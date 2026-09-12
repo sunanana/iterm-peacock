@@ -18,6 +18,8 @@ source "$_root/iterm-peacock.sh"
 # ヘルプは .peacock の仕様の一次情報として扱う。README ではなく手元のこの出力が常に版と一致するため、
 # 詳細はトピックに分けてここに置き、README からはこちらへ誘導する。
 # 利用者が人間でも coding agent でも最初に読む場所になるよう、全文を英語で書く。
+# coding agent 向けの案内は個々のコマンドを挙げず、ファイルを書く・インストール先を変える・
+# ネットワークを使う・端末が要る、という性質で書く。コマンドを足すたびに追記しなくて済むようにするため。
 _usage() {
   cat <<'EOF'
 iterm-peacock — per-directory iTerm2 colors, driven by a .peacock file.
@@ -69,8 +71,18 @@ open keeps the hook it sourced, so open a new shell after updating.
 
 Requires iTerm2. Other terminals ignore the escape sequences and nothing changes.
 
-If you are a coding agent, run `iterm-peacock help config` before writing a .peacock
-by hand, and prefer `iterm-peacock set <key> <value>`, which validates the value.
+For coding agents:
+  Run `iterm-peacock help config` before writing a .peacock by hand, and prefer
+  `iterm-peacock set <key> <value>`, which validates the value.
+
+  Some commands write files (in the current directory or the settings directory),
+  change the installed copy of iterm-peacock, reach the network, or need an
+  interactive terminal. Your environment may not allow that: a sandbox, "Operation
+  not permitted", "Permission denied", a read-only file system, a blocked network,
+  or no terminal. When a command is stopped like this, do not try to reach the same
+  result another way, such as writing the file yourself, running git by hand, or
+  retrying with the restriction lifted. Show the user the exact command you ran and
+  ask them to run it in their own terminal, then continue once they have.
 EOF
 }
 

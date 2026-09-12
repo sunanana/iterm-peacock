@@ -403,6 +403,7 @@ case_help() {
   [[ "$output" == *'cursor-guide'* ]]
   [[ "$output" == *'iterm-peacock help config'* ]]
   [[ "$output" == *'iterm-peacock update'* ]]
+  [[ "$output" == *'ask them to run it in their own terminal'* ]]
 }
 
 case_help_topics() {
