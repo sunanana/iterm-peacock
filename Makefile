@@ -24,7 +24,7 @@ help: ## ヘルプメッセージ表示
 		printf "  %-20s %s\n", $$1, $$2; \
 	}'
 
-.PHONY: help setup test test/hook test/keys test/cli test/picker test/plugin
+.PHONY: help setup test test/hook test/keys test/command test/cli test/picker test/plugin
 
 setup: ## 開発に必要なものを入れる（テストに使う bats）
 	brew install bats-core
@@ -37,6 +37,9 @@ test/hook: ## シェルフックのテストだけ実行（bash と zsh）
 
 test/keys: ## キーごとのエスケープシーケンスのテストだけ実行（bash と zsh）
 	bats test/keys.bats
+
+test/command: ## コマンド連動のテストだけ実行（bash と zsh）
+	bats test/command.bats
 
 test/cli: ## CLI のテストだけ実行
 	bats test/cli.bats

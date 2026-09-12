@@ -15,6 +15,20 @@ bg_seq() {
   printf '%s]11;rgb:%s/%s/%s%s' "$ESC" "${hex:0:2}" "${hex:2:2}" "${hex:4:2}" "$BEL"
 }
 
+# タブ色を変える iTerm2 独自シーケンス（赤・緑・青の3つ組）の期待値
+tab_seq() {
+  local hex="$1" color
+  for color in red green blue; do
+    printf '%s]6;1;bg;%s;brightness;%d%s' "$ESC" "$color" "$((16#${hex:0:2}))" "$BEL"
+    hex="${hex:2}"
+  done
+}
+
+# バッジを設定する OSC 1337 の期待値
+badge_seq() {
+  printf '%s]1337;SetBadgeFormat=%s%s' "$ESC" "$(printf '%s' "$1" | base64 | tr -d '\n')" "$BEL"
+}
+
 setup() {
   cd "$BATS_TEST_TMPDIR"
 }

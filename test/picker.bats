@@ -13,10 +13,11 @@ DOWN='\033[B|'
 # 端末が DSR（ESC [ 5 n）に返す応答
 REPLY='\033[0n'
 
-# カレントディレクトリでの k 番目（1ページ10件の通し番号）の候補を
-# 「背景 文字 タブ カーソル 選択範囲 選択範囲の文字 赤 緑 黄 青」で出力する
+# k 番目（1ページ10件の通し番号）の候補を
+# 「背景 文字 タブ カーソル 選択範囲 選択範囲の文字 赤 緑 黄 青」で出力する。
+# 色相の種は既定でカレントディレクトリ名。セクションに向けたときは SEED に見出しを入れる
 candidate() {
-  bash -c "source '$BIN'; _suggest_page \"\$(_hue_of_dir)\" $(($1 / 10)) | sed -n $(($1 % 10 + 1))p"
+  SEED="${SEED:-${PWD##*/}}" bash -c "source '$BIN'; _suggest_page \"\$(_hue_of \"\$SEED\")\" $(($1 / 10)) | sed -n $(($1 % 10 + 1))p"
 }
 
 # 候補 k の各色を .peacock の行にしたもの
@@ -207,6 +208,51 @@ case_keeps_other_lines() {
   [ "$(cat .peacock)" = $'# note\nbadge=PROD\n'"${lines%%$'\n'*}"$'\nmagenta=#ff00ff\n'"${lines#*$'\n'}" ]
 }
 
+case_section_enter_saves_into_ini() {
+  local SEED='[prod-db-*]'
+  mkdir -p config
+  export PEACOCK_CONFIG_DIR="$PWD/config"
+  run_in_pty '\r' "$BIN" cmd mysql set 'prod-db-*'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"saved -> $PWD/config/mysql.ini [prod-db-*]"* ]]
+  [ "$(cat config/mysql.ini)" = $'[prod-db-*]\n'"$(candidate_lines 0)" ]
+}
+
+case_section_keeps_the_rest_of_the_file() {
+  local SEED='[prod-db-*]'
+  mkdir -p config
+  export PEACOCK_CONFIG_DIR="$PWD/config"
+  printf '# hosts\n[prod-db-*]\nbadge=PRODUCTION\n\n[staging-db-*]\nbackground=#000030\n' > config/mysql.ini
+  run_in_pty '\r' "$BIN" cmd mysql set 'prod-db-*'
+  [ "$status" -eq 0 ]
+  # 見出しの中身だけを差し替え、前のコメント・後ろのセクション・その間の空行はそのまま残す
+  [ "$(cat config/mysql.ini)" = $'# hosts\n[prod-db-*]\nbadge=PRODUCTION\n'"$(candidate_lines 0)"$'\n\n[staging-db-*]\nbackground=#000030' ]
+}
+
+case_section_badge_defaults_to_pattern() {
+  local SEED='[prod-db-*]'
+  mkdir -p config
+  export PEACOCK_CONFIG_DIR="$PWD/config"
+  run_in_pty "$UP$UP"' |\r' "$BIN" cmd mysql set 'prod-db-*'
+  [ "$(cat config/mysql.ini)" = $'[prod-db-*]\n'"$(candidate_lines 0)"$'\nbadge=prod-db-*' ]
+}
+
+case_section_cancel_writes_nothing() {
+  mkdir -p config
+  export PEACOCK_CONFIG_DIR="$PWD/config"
+  run_in_pty '\033' "$BIN" cmd mysql set 'prod-db-*'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *canceled* ]]
+  [ ! -e config/mysql.ini ]
+}
+
+case_section_requires_a_pattern() {
+  mkdir -p config
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql set
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'cmd mysql set <pattern>'* ]]
+}
+
 case_requires_terminal() {
   run "$BIN" < /dev/null
   [ "$status" -eq 1 ]
@@ -314,6 +360,11 @@ bats_test_function --description "Esc で親の .peacock の配色に戻す" -- 
 bats_test_function --description "Ctrl+D でも保存せずに終わる" -- case_ctrl_d_cancels
 bats_test_function --description "Ctrl+C でも保存せずに終わり、元の配色に戻す" -- case_ctrl_c_cancels_and_restores
 bats_test_function --description "既存の .peacock の他の行を残す" -- case_keeps_other_lines
+bats_test_function --description "cmd <command> set <pattern> で ini のセクションに保存する" -- case_section_enter_saves_into_ini
+bats_test_function --description "セクションへの保存で他のセクションとコメントを残す" -- case_section_keeps_the_rest_of_the_file
+bats_test_function --description "セクションでは Badge の既定の文字がパターンになる" -- case_section_badge_defaults_to_pattern
+bats_test_function --description "セクションへの保存も Esc で書き込まない" -- case_section_cancel_writes_nothing
+bats_test_function --description "cmd <command> set はパターンがなければ失敗する" -- case_section_requires_a_pattern
 bats_test_function --description "端末でなければエラーにする" -- case_requires_terminal
 bats_test_function --description "同じディレクトリ名なら同じ候補から始まる" -- case_same_dir_name_same_start
 bats_test_function --description "1つの一覧に同じ候補が並ばない" -- case_list_has_no_duplicates

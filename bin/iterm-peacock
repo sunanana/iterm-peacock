@@ -27,12 +27,21 @@ Usage:
   iterm-peacock set <key> <value>   Set any key in ./.peacock (e.g. set badge My Project)
   iterm-peacock unset               Delete ./.peacock
   iterm-peacock unset <key>         Remove one key from ./.peacock
+  iterm-peacock cmd                 List every command's settings and their sections
+  iterm-peacock cmd <cmd>           List the sections of <cmd>.ini
+  iterm-peacock cmd <cmd> <word>    Show the section <word> matches, and its settings
+  iterm-peacock cmd <cmd> edit      Open <cmd>.ini in $VISUAL or $EDITOR
+  iterm-peacock cmd <cmd> set <pattern> [<key> <value>]
+                                    Pick a scheme for that section, or set one key
+  iterm-peacock cmd <cmd> unset [<pattern> [<key>]]
+                                    Delete the file, one section, or one key in it
   iterm-peacock where               Print the path of the .peacock in effect
   iterm-peacock help [topic]        Show this help, or one of the topics below
 
 Topics:
   config    .peacock file format, every key it accepts, and how a file is chosen
   picker    Keys and behavior of the interactive picker
+  cmd       Coloring while a command such as ssh or mysql is running
 
 Keys (details: iterm-peacock help config):
   background foreground tab cursor selection selection-text    color
@@ -46,6 +55,9 @@ Colors are #rrggbb or #rgb, and the # may be omitted.
 set and unset only touch ./.peacock. The shell hook picks the nearest .peacock by
 walking up from the current directory, so the file you edit is not always the one
 in effect; `iterm-peacock where` prints the one that is.
+
+A command such as ssh or mysql can carry its own colors, from a directory of per-command
+files keyed by pattern. See `iterm-peacock help cmd`.
 
 Requires iTerm2. Other terminals ignore the escape sequences and nothing changes.
 
@@ -105,6 +117,95 @@ Writing the file:
 EOF
 }
 
+_help_cmd() {
+  cat <<'EOF'
+cmd — color the terminal while a command is running
+
+A directory of .ini files, one per command. The presence of mysql.ini is what makes
+mysql hooked; no list of commands is kept anywhere else. Each file maps patterns to the
+same settings a .peacock holds, and while the command runs those settings are in effect.
+
+The directory:
+  ~/.config/iterm-peacock/, or $XDG_CONFIG_HOME/iterm-peacock/ if that is set.
+  PEACOCK_CONFIG_DIR points somewhere else.
+  A command with no <command>.ini is never touched.
+
+Format:
+  [<pattern>...]    Starts a section. Patterns are separated by spaces.
+  <key>=<value>     The same keys and values a .peacock accepts.
+
+  Patterns are globs (*, ?, [...]). The first section that matches wins, lines before
+  the first section are ignored, and comments, blank lines and a line holding nothing
+  but a color work as they do in a .peacock.
+
+What a pattern is matched against:
+  Every word of the command line except the command itself and words starting with -.
+  A section matches as soon as one of those words matches one of its patterns, so a
+  host, a profile or a database name is picked up without this tool knowing the option
+  grammar of each command.
+    mysql -h prod-db-01 -u app mydb    prod-db-01, app and mydb are offered
+    psql -h db.prod.example.com        the host name is offered
+  Write patterns tight enough to say what you mean: [*prod*] also matches a user named
+  prod_user, while [prod-db-*] does not.
+  ssh is the exception. Its option grammar is known, so only the destination is matched
+  and a login is required: a remote command (ssh host ls) and the options -N -f -W -G -O
+  are left alone.
+
+Example:
+  # ~/.config/iterm-peacock/mysql.ini
+  [prod-db-* *.prod.example.com]
+  background=#300000
+  badge=PRODUCTION
+
+  [staging-db-*]
+  background=#000030
+
+What applies:
+  Only the matching section. The .peacock of the current directory is set aside while
+  the command runs, so the terminal looks exactly as if that section were a .peacock of
+  its own. If no section matches, nothing changes.
+  A section without a badge of its own shows the word that matched as the badge; set
+  PEACOCK_COMMAND_BADGE=0 to leave the badge alone.
+  The colors come back when the command exits, an interrupted one included.
+  A command that finishes at once still flashes its colors, so add an .ini only for a
+  command you use interactively.
+
+Turning it on:
+  zsh   The plugin registers a preexec hook, so no command is wrapped, and a new .ini
+        takes effect right away. Set PEACOCK_COMMANDS=0 before sourcing the plugin to
+        leave the hook out.
+  bash  Call `_peacock_wrap_commands` in ~/.bashrc after sourcing iterm-peacock.sh. It
+        defines a wrapper function for each .ini it finds, so a new .ini needs a new
+        shell or another call.
+
+Commands:
+  cmd                              List every command and its sections
+  cmd list                         The same, spelled out
+  cmd <command>                    List the sections of <command>.ini
+  cmd <command> <word>             Show the section <word> matches, and its settings
+  cmd <command> show <word>        The same, spelled out
+  cmd <command> edit               Open <command>.ini in $VISUAL or $EDITOR
+  cmd <command> set <pattern>      Pick a scheme and save it as that section
+  cmd <command> set <pattern> <key> <value>
+                                   Set one key of that section
+  cmd <command> unset              Delete <command>.ini
+  cmd <command> unset <pattern>    Remove that section
+  cmd <command> unset <pattern> <key>
+                                   Remove one key from that section
+
+  Quote a pattern so the shell does not expand it: cmd mysql set 'prod-db-*'.
+  set is create-or-update: it writes the key where it already stands and adds it where
+  it does not, so running it twice leaves the same file. There is no separate update.
+  unset is the only thing that removes anything. Removing the last key of a section
+  removes the section, and removing the last section removes the file, the way unsetting
+  the last key of a .peacock removes the file.
+  list and show exist so a script never has to rely on a word not being a verb; a host
+  literally named set, unset, edit, show or list has to be written with show.
+  Nothing is generated or cached, so editing the file by hand is equally fine. Other
+  sections, other keys and comments are kept as they are by every one of these.
+EOF
+}
+
 _help_picker() {
   cat <<'EOF'
 Interactive picker — `iterm-peacock` with no arguments
@@ -112,6 +213,10 @@ Interactive picker — `iterm-peacock` with no arguments
 An options section (badge, cursor guide) sits above a list of 10 color schemes. Each
 row is one complete scheme, and the selected row is applied to the terminal live, so
 the list is previewed rather than described.
+
+`iterm-peacock cmd <command> set <pattern>` opens the same picker and writes into a
+section of <command>.ini instead of ./.peacock. Badge then defaults to the pattern, and
+the first page is derived from the pattern rather than the directory name.
 
 Columns:
   BG       background
@@ -142,16 +247,17 @@ Notes:
   The cursor is hidden while the picker runs, so judge the cursor color from the Cursor
   column. The hidden cursor sits on the selected row, which is why turning on the
   cursor guide highlights that row.
-  Badge defaults to the directory name. If .peacock already has a badge, that text is
-  used instead and the option starts on.
+  Badge defaults to the directory name, or to the pattern when writing a section. If a
+  badge is already saved, that text is used instead and the option starts on. Left off
+  in a section, the word that matched is shown as the badge at run time.
   iTerm2 applies color changes one at a time, so after each redraw the picker asks the
   terminal for a status report (ESC [ 5 n) and waits for the reply (ESC [ 0 n) before
   accepting the next key. Keys that arrive in between are dropped, so holding a key
   down does not queue up input. Esc is taken immediately and Enter as soon as the
   redraw finishes. On terminals that never answer, the handshake happens once at
   startup and is then skipped.
-  An existing .peacock keeps its other lines and comments; only the keys above, badge
-  and cursor-guide are rewritten.
+  An existing .peacock, or an existing section, keeps its other lines and comments;
+  only the keys above, badge and cursor-guide are rewritten.
   The picker needs a terminal. In a script or a pipeline, use `iterm-peacock show`.
 EOF
 }
@@ -161,8 +267,9 @@ _help() {
     "") _usage ;;
     config) _help_config ;;
     picker) _help_picker ;;
+    cmd) _help_cmd ;;
     *)
-      echo "iterm-peacock: unknown help topic '$1' (topics: config, picker)" >&2
+      echo "iterm-peacock: unknown help topic '$1' (topics: config, picker, cmd)" >&2
       exit 1
       ;;
   esac
@@ -259,15 +366,321 @@ _show() {
   _peacock_resolve
 }
 
+# ---- コマンド連動の設定 ----
+
+# 設定ファイルのセクション見出しを prefix 付きで順に出力する
+_cmd_sections() {
+  local raw line
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\]) printf '%s%s\n' "${2:-}" "$line" ;;
+    esac
+  done < "$1"
+}
+
+# target に当てはまる最初のセクション見出しを出力する。当てはまるものがなければ失敗する
+_cmd_match() {
+  local raw line patterns
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        patterns="${line#\[}"
+        if _peacock_matches "$2" "${patterns%\]}"; then
+          printf '%s\n' "$line"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$1"
+  return 1
+}
+
+# セクションに属していない行と、解釈できなかった行を標準エラーに知らせる
+_warn_cmd_ignored() {
+  local raw line key value started=0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      \[*\]) started=1; continue ;;
+    esac
+    if [[ $started -eq 0 ]]; then
+      # セクションの外の設定は効かない。コメントだけは黙って読み飛ばす
+      if _peacock_parse_line "$line" || [[ "$line" != \#* ]]; then
+        echo "iterm-peacock: ignored (before the first section): $raw" >&2
+      fi
+      continue
+    fi
+    if ! _peacock_parse_line "$line"; then
+      case "$line" in
+        \#*) continue ;;
+      esac
+      echo "iterm-peacock: ignored: $raw" >&2
+    fi
+  done < "$1"
+}
+
+# 設定のあるコマンドとそのセクションを一覧する
+_cmd_list() {
+  local dir path name found=1
+  _peacock_config_dir
+  echo "# $dir"
+  for path in "$dir"/*.ini; do
+    [[ -f "$path" ]] || continue
+    found=0
+    name="${path##*/}"
+    echo "${name%.ini}"
+    _warn_cmd_ignored "$path"
+    _cmd_sections "$path" '  '
+  done
+  [[ $found -eq 0 ]] || _die "no <command>.ini in $dir (run: iterm-peacock help cmd)"
+}
+
+# 設定ファイルから section 見出しの中身を、行をそのまま出力する（見出し行は含まない）。
+# 見出しはパターンとしてではなく、書かれたとおりの文字列として突き合わせる
+_cmd_section_body() {
+  local file="$1" section="$2" raw line inside=0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        if [[ $inside -eq 1 ]]; then
+          return 0
+        fi
+        [[ "$line" == "$section" ]] && inside=1
+        continue
+        ;;
+    esac
+    if [[ $inside -eq 1 ]]; then
+      printf '%s\n' "$raw"
+    fi
+  done < "$file"
+}
+
+# 設定ファイルの section 見出しの中身を body に差し替えた内容を出力する。
+# 見出しがなければ末尾に足す。他のセクションとコメントはそのまま残す
+_cmd_write_section() {
+  local file="$1" section="$2" body="$3" raw line inside=0 found=1
+  if [[ -f "$file" ]]; then
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      _peacock_strip "$raw"
+      case "$line" in
+        \[*\])
+          if [[ $inside -eq 1 ]]; then
+            # 差し替えた中身と次の見出しの間を空ける（元の空行は中身として取り込まれ、落ちている）
+            printf '\n'
+            inside=0
+          fi
+          if [[ "$line" == "$section" && $found -eq 1 ]]; then
+            found=0
+            inside=1
+            printf '%s\n' "$raw"
+            if [[ -n "$body" ]]; then
+              printf '%s\n' "$body"
+            fi
+            continue
+          fi
+          ;;
+      esac
+      if [[ $inside -eq 1 ]]; then
+        continue
+      fi
+      printf '%s\n' "$raw"
+    done < "$file"
+  fi
+  if [[ $found -eq 1 ]]; then
+    if [[ -s "$file" ]]; then
+      printf '\n'
+    fi
+    printf '%s\n' "$section"
+    if [[ -n "$body" ]]; then
+      printf '%s\n' "$body"
+    fi
+  fi
+}
+
+# section 見出しがあるかを調べる
+_cmd_has_section() {
+  local raw line
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    if [[ "$line" == "$2" ]]; then
+      return 0
+    fi
+  done < "$1"
+  return 1
+}
+
+# セクションの中身に target キーの行があるかを調べる
+_cmd_body_has_key() {
+  local raw key value
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    if _peacock_parse_line "$raw" && [[ "$key" == "$2" ]]; then
+      return 0
+    fi
+  done <<< "$1"
+  return 1
+}
+
+# 設定ファイルから section 見出しとその中身を取り除いた内容を出力する
+_cmd_remove_section() {
+  local file="$1" section="$2" raw line inside=0 removed=1
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        inside=0
+        if [[ "$line" == "$section" && $removed -eq 1 ]]; then
+          removed=0
+          inside=1
+          continue
+        fi
+        ;;
+    esac
+    if [[ $inside -eq 1 ]]; then
+      continue
+    fi
+    printf '%s\n' "$raw"
+  done < "$file"
+}
+
+# 書き換えた内容を設定ファイルに書く。中身がなくなればファイルごと消す
+_cmd_save() {
+  local file="$1" content="$2"
+  if [[ -z "$content" ]]; then
+    rm -f "$file"
+    return 0
+  fi
+  mkdir -p "${file%/*}"
+  printf '%s\n' "$content" > "$file"
+}
+
+# 設定ファイルのセクションを一覧する
+_cmd_list_sections() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || _die "no settings for '$name' at $file (run: iterm-peacock help cmd)"
+  echo "# $file"
+  _warn_cmd_ignored "$file"
+  _cmd_sections "$file"
+}
+
+# target に当てはまるセクションと、それが作る設定を表示する。
+# フックと同じ解決を通すため、表示と実際の配色がずれない
+_cmd_show() {
+  local file="$1" name="$2" target="$3" section
+  [[ -f "$file" ]] || _die "no settings for '$name' at $file (run: iterm-peacock help cmd)"
+  echo "# $file"
+  _warn_cmd_ignored "$file"
+  section="$(_cmd_match "$file" "$target")" || _die "no section matches '$target' in $file"
+  echo "$section"
+  [[ -n "$(_peacock_read_section "$file" "$target")" ]] || _die "no valid settings in $section"
+  _PEACOCK_CMD="$name"
+  _PEACOCK_TARGET="$target"
+  _peacock_resolve
+}
+
+# 設定ファイルをエディタで開く。ファイルは開いた先で作られるよう、置き場所だけ用意する
+_cmd_edit() {
+  local file="$1" editor="${VISUAL:-${EDITOR:-}}"
+  [[ -n "$editor" ]] || _die "set \$VISUAL or \$EDITOR to edit $file"
+  mkdir -p "${file%/*}"
+  # EDITOR="code -w" のように引数付きで指定できるよう、意図的に分割している
+  # shellcheck disable=SC2086
+  $editor "$file"
+}
+
+# セクションを書く。キーを渡さなければ配色ピッカーに任せ、渡せばそのキーだけを書く。
+# 同じキーはその位置で置き換えるため、何度実行しても同じ内容になる
+_cmd_set() {
+  local file="$1" name="$2" pattern="$3" key value body
+  shift 3
+  [[ -n "$pattern" ]] || _die "usage: iterm-peacock cmd $name set <pattern> [<key> <value>]"
+  if [[ $# -eq 0 ]]; then
+    _pick_file="$file"
+    _pick_section="[$pattern]"
+    _pick
+    return 0
+  fi
+  [[ $# -ge 2 ]] || _die "usage: iterm-peacock cmd $name set <pattern> <key> <value>"
+  key="$1"
+  value="${*:2}"
+  _is_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+  # フックと同じ解釈を通して値を検証・正規化する（key / value が正規化された値になる）
+  _peacock_parse_line "$key=$value" || _die "invalid value for $key: '$value' (run: iterm-peacock help config)"
+  body=""
+  if [[ -f "$file" ]]; then
+    body="$(_cmd_section_body "$file" "[$pattern]")"
+  fi
+  _cmd_save "$file" "$(_cmd_write_section "$file" "[$pattern]" "$(_merge "$body" "$key=$value")")"
+  echo "$key=$value -> $file [$pattern]"
+}
+
+# パターンを渡さなければ設定ファイルごと、渡せばそのセクション、
+# キーまで渡せばセクションからそのキーだけを消す。
+# 最後のキーを消すとセクションごと、最後のセクションを消すとファイルごと消える
+_cmd_unset() {
+  local file="$1" name="$2" pattern="${3:-}" key="${4:-}" body
+  [[ -f "$file" ]] || _die "no settings for '$name' at $file"
+  if [[ -z "$pattern" ]]; then
+    rm "$file"
+    return 0
+  fi
+  _cmd_has_section "$file" "[$pattern]" || _die "no [$pattern] in $file"
+  if [[ -z "$key" ]]; then
+    _cmd_save "$file" "$(_cmd_remove_section "$file" "[$pattern]")"
+    return 0
+  fi
+  _is_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+  body="$(_cmd_section_body "$file" "[$pattern]")"
+  _cmd_body_has_key "$body" "$key" || _die "no $key in $file [$pattern]"
+  body="$(_merge "$body" "$key=")"
+  if [[ -n "$(_peacock_read /dev/stdin <<< "$body")" ]]; then
+    _cmd_save "$file" "$(_cmd_write_section "$file" "[$pattern]" "$body")"
+  else
+    _cmd_save "$file" "$(_cmd_remove_section "$file" "[$pattern]")"
+  fi
+}
+
+# cmd サブコマンドの入口。動詞は .peacock 側（show / set / unset）と同じ語彙に揃えている
+_cmd() {
+  local name="${1:-}" file
+  case "$name" in
+    ""|list)
+      _cmd_list
+      return 0
+      ;;
+  esac
+  _peacock_config_file "$name"
+  case "${2:-}" in
+    "") _cmd_list_sections "$file" "$name" ;;
+    edit)
+      [[ $# -eq 2 ]] || _die "usage: iterm-peacock cmd $name edit"
+      _cmd_edit "$file"
+      ;;
+    set) _cmd_set "$file" "$name" "${3:-}" "${@:4}" ;;
+    unset) _cmd_unset "$file" "$name" "${3:-}" "${4:-}" ;;
+    show)
+      [[ $# -eq 3 ]] || _die "usage: iterm-peacock cmd $name show <word>"
+      _cmd_show "$file" "$name" "$3"
+      ;;
+    *)
+      [[ $# -eq 2 ]] || _die "usage: iterm-peacock cmd $name <word> (run: iterm-peacock help cmd)"
+      _cmd_show "$file" "$name" "$2"
+      ;;
+  esac
+}
+
 # ---- 配色ピッカー ----
 
 # 1ページに並べる候補の数
 _PICK_ROWS=10
 
-# ディレクトリ名から最初の候補の色相（0〜359）を決める。同じ名前なら毎回同じ色から始まる
-_hue_of_dir() {
+# 文字列から最初の候補の色相（0〜359）を決める。同じ文字列なら毎回同じ色から始まる
+_hue_of() {
   local crc
-  crc="$(printf '%s' "${PWD##*/}" | cksum)"
+  crc="$(printf '%s' "$1" | cksum)"
   echo $(( ${crc%% *} % 360 ))
 }
 
@@ -367,6 +780,9 @@ _text_sample() {
 }
 
 # ピッカーの状態。終了時の後始末（trap）からも参照するためグローバルに置く
+# 保存先。_pick_section が空なら .peacock を丸ごと、入っていればその見出しの中身だけを書き換える
+_pick_file=".peacock"
+_pick_section=""
 _pick_tty=""
 _pick_before=""
 _pick_shown=""
@@ -395,10 +811,16 @@ _pick_load_page() {
   done < <(_suggest_page "$_pick_hue0" "$_pick_page")
 }
 
-# 既存の .peacock からバッジとカーソルガイドの初期状態を決める。バッジの文字がなければディレクトリ名を使う
+# 保存先の既存の内容からバッジとカーソルガイドの初期状態を決める。
+# バッジの文字がなければ、保存先を言い表すもの（ディレクトリ名かパターン）を使う
 _pick_load_toggles() {
   local line
-  _pick_badge_text="${PWD##*/}"
+  if [[ -n "$_pick_section" ]]; then
+    line="${_pick_section#\[}"
+    _pick_badge_text="${line%\]}"
+  else
+    _pick_badge_text="${PWD##*/}"
+  fi
   while IFS= read -r line; do
     case "$line" in
       badge=*) _pick_badge=1; _pick_badge_text="${line#badge=}" ;;
@@ -623,7 +1045,11 @@ _pick_cleanup() {
   if [[ -n "$_pick_tty" ]]; then
     _pick_erase
     if [[ $_pick_saved -eq 1 ]]; then
-      printf 'saved -> %s\n' "$PWD/.peacock"
+      if [[ -n "$_pick_section" ]]; then
+        printf 'saved -> %s %s\n' "$_pick_file" "$_pick_section"
+      else
+        printf 'saved -> %s\n' "$PWD/$_pick_file"
+      fi
     else
       printf 'canceled\n'
     fi
@@ -639,6 +1065,18 @@ _pick_cleanup() {
   fi
 }
 
+# 選んでいる配色を保存先に書く。セクションに向けている場合は、その見出しの中身だけを差し替える
+_pick_save() {
+  local content
+  if [[ -z "$_pick_section" ]]; then
+    printf '%s\n' "$_pick_content" > "$_pick_file"
+    return 0
+  fi
+  content="$(_cmd_write_section "$_pick_file" "$_pick_section" "$_pick_content")"
+  mkdir -p "${_pick_file%/*}"
+  printf '%s\n' "$content" > "$_pick_file"
+}
+
 # 設定欄（バッジ・カーソルガイド）と配色の候補の一覧を出し、選んでいる候補をその場で端末に反映する。
 # ↑↓ で設定欄と一覧を行き来し、設定の行では Space で切り替え、Tab で別の候補の一覧、
 # Enter で .peacock に保存、Esc / Ctrl+D / Ctrl+C でやめる
@@ -646,10 +1084,18 @@ _pick() {
   [[ -t 0 && -t 1 ]] || _die "the color picker needs a terminal (use 'iterm-peacock show' to print settings, or 'iterm-peacock help picker')"
   local dirty=1
 
-  if [[ -f .peacock ]]; then
-    _pick_current="$(<.peacock)"
+  if [[ -f "$_pick_file" ]]; then
+    if [[ -n "$_pick_section" ]]; then
+      _pick_current="$(_cmd_section_body "$_pick_file" "$_pick_section")"
+    else
+      _pick_current="$(<"$_pick_file")"
+    fi
   fi
-  _pick_hue0="$(_hue_of_dir)"
+  if [[ -n "$_pick_section" ]]; then
+    _pick_hue0="$(_hue_of "$_pick_section")"
+  else
+    _pick_hue0="$(_hue_of "${PWD##*/}")"
+  fi
   _pick_before="$(_peacock_resolve)"
   _pick_shown="$_pick_before"
   _pick_load_toggles
@@ -702,7 +1148,7 @@ _pick() {
         esac
         ;;
       enter)
-        printf '%s\n' "$_pick_content" > .peacock
+        _pick_save
         _pick_saved=1
         # 保存の表示は終了時の _pick_cleanup で行う
         return 0
@@ -761,6 +1207,9 @@ _main() {
       else
         rm .peacock
       fi
+      ;;
+    cmd)
+      _cmd "${@:2}"
       ;;
     where)
       file="$(_peacock_find)" || _die "no .peacock"

@@ -2,7 +2,8 @@
 
 Drop a `.peacock` file in a directory and iTerm2 changes its background, text, tab
 color and badge as soon as you cd into it. Leave the directory and everything goes
-back. A zsh plugin; bash works too.
+back. `ssh`, `mysql` and any other command can carry their own colors too, so
+production never looks like staging. A zsh plugin; bash works too.
 
 ![iterm-peacock demo](demo.gif)
 
@@ -22,7 +23,8 @@ source ~/.zshrc
 git clone https://github.com/sunanana/iterm-peacock ~/.zsh/iterm-peacock
 cat >> ~/.bashrc <<'EOF'
 source ~/.zsh/iterm-peacock/iterm-peacock.sh
-PROMPT_COMMAND="_peacock_apply${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+PROMPT_COMMAND="_peacock_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+_peacock_wrap_commands
 EOF
 source ~/.bashrc
 ```
@@ -53,6 +55,49 @@ The nearest `.peacock` found by walking up from the current directory wins.
 | `~/src/api/internal` | `~/src/api/.peacock` |
 | `~/src/docs` | `~/src/.peacock` |
 | `~` | none — the profile colors are restored |
+
+## Commands
+
+One `.ini` per command, in `~/.config/iterm-peacock/`. The presence of `mysql.ini` is
+what makes `mysql` hooked, and while the command runs its colors are in effect.
+
+```ini
+# ~/.config/iterm-peacock/mysql.ini
+
+[prod-db-* *.prod.example.com]
+background=#300000
+badge=PRODUCTION
+
+[staging-db-*]
+background=#000030
+```
+
+Patterns are matched against every word of the command line except the command itself
+and words starting with `-`, so a host, a profile or a database name is picked up
+without this tool knowing each command's options.
+
+```
+mysql -h prod-db-01 -u app mydb    prod-db-01 matches, the terminal turns red
+psql -h db.staging.example.com     no section matches, nothing changes
+```
+
+`ssh` is the exception: its option grammar is known, so only the destination is
+matched and a login is required — `ssh host ls` is left alone.
+
+```zsh
+iterm-peacock cmd                                   # every command and its sections
+iterm-peacock cmd mysql prod-db-01                  # what that word would get
+iterm-peacock cmd mysql set 'prod-db-*'             # pick a scheme for that section
+iterm-peacock cmd mysql set 'prod-db-*' badge PROD  # set one key
+iterm-peacock cmd mysql unset 'prod-db-*'           # remove that section
+iterm-peacock cmd mysql edit                        # open mysql.ini in $EDITOR
+```
+
+`set` is create-or-update, so running it twice leaves the same file, and `unset` is the
+only thing that removes anything — the same verbs the `.peacock` side uses.
+
+In zsh a `preexec` hook watches the command line, so no command is wrapped; bash wraps
+them, as the install snippet above does.
 
 ## Help
 

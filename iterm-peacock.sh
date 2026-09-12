@@ -4,7 +4,8 @@
 #        フックの登録と CLI の PATH 追加はそちらで行う。
 #
 # Bash:  source iterm-peacock.sh
-#        PROMPT_COMMAND="_peacock_apply${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+#        PROMPT_COMMAND="_peacock_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+#        _peacock_wrap_commands         # コマンド連動を使う場合だけ
 #
 # CLI とプラグインからも source され、.peacock の探索・解釈はここに集約している。
 # macOS 標準の bash 3.2 と zsh の両方で動く書き方に限定すること。
@@ -15,6 +16,11 @@
 
 # 直前に適用した設定（key=value の改行区切り）。変化がなければ何も出力しないためのキャッシュ
 _PEACOCK_LAST=""
+
+# 設定を持つコマンドを実行している間だけ入る、コマンド名と当てはまった語。
+# 入っている間はディレクトリの代わりにこの2つで設定を決める
+_PEACOCK_CMD=""
+_PEACOCK_TARGET=""
 
 # $PWD から親へ辿り、最初に見つかった .peacock のパスを出力する
 _peacock_find() {
@@ -59,17 +65,24 @@ _peacock_normalize() {
   hex="$v"
 }
 
-# .peacock の1行を解釈し、呼び出し側の変数 key / value に入れる。対応キーの正しい値でなければ失敗する。
-#   - `key=value` 形式。= の前後の空白は無視する
-#   - 色だけを書いた行（#rrggbb）は background として扱う
-#   - # で始まる行（色だけの行を除く）と、「空白 + # + 空白」以降はコメント
-_peacock_parse_line() {
-  local line="$1" hex
+# 行の前後の空白と行末コメントを取り除き、呼び出し側の変数 line に入れる（サブシェルを避けるため）。
+# 「空白 + # + 空白」以降はコメント。# で始まる行をどう扱うかは呼び出し側で決める
+_peacock_strip() {
+  line="$1"
   # zsh の EXTENDED_GLOB では素の # がパターン演算子になるためエスケープしている
   line="${line%%[[:space:]]\#[[:space:]]*}"
   line="${line%[[:space:]]\#}"
   line="${line#"${line%%[![:space:]]*}"}"
   line="${line%"${line##*[![:space:]]}"}"
+}
+
+# 設定の1行を解釈し、呼び出し側の変数 key / value に入れる。対応キーの正しい値でなければ失敗する。
+#   - `key=value` 形式。= の前後の空白は無視する
+#   - 色だけを書いた行（#rrggbb）は background として扱う
+#   - # で始まる行（色だけの行を除く）と、「空白 + # + 空白」以降はコメント
+_peacock_parse_line() {
+  local line hex
+  _peacock_strip "$1"
   [[ -n "$line" ]] || return 1
 
   if [[ "$line" == *=* ]]; then
@@ -112,16 +125,31 @@ _peacock_read() {
   done < "$file"
 }
 
-# 最寄りの .peacock から、実際に適用する設定を出力する
+# 最寄りの .peacock、またはコマンドの実行中ならその設定から、実際に適用する設定を出力する
 _peacock_resolve() {
   local file config=""
+  if [[ -n "$_PEACOCK_CMD" ]]; then
+    _peacock_config_file "$_PEACOCK_CMD"
+    if [[ -f "$file" ]]; then
+      config="$(_peacock_read_section "$file" "$_PEACOCK_TARGET")"
+    fi
+    if [[ -n "$config" ]]; then
+      # 何につないでいるかが分かる目印がなければ、当てはまった語をバッジに出す
+      if [[ "${PEACOCK_COMMAND_BADGE:-1}" != 0 && $'\n'"$config" != *$'\n'badge=* ]]; then
+        config="$config"$'\n'"badge=$_PEACOCK_TARGET"
+      fi
+      _peacock_finalize "$config"
+      return 0
+    fi
+    config=""
+  fi
   if file="$(_peacock_find)"; then
     config="$(_peacock_read "$file")"
   fi
   _peacock_finalize "$config"
 }
 
-# .peacock の設定（_peacock_read の出力）に、ファイル外の規則を足して適用する設定にする。
+# 設定（_peacock_read などの出力）に、ファイル外の規則を足して適用する設定にする。
 #   - tab の指定がなければ background と同じ色にする
 _peacock_finalize() {
   local config="$1" line bg="" out=""
@@ -208,4 +236,233 @@ _peacock_apply() {
   [[ "$config" == "$_PEACOCK_LAST" ]] && return 0
   _peacock_render "$_PEACOCK_LAST" "$config"
   _PEACOCK_LAST="$config"
+}
+
+# プロンプトを出す直前に呼ぶ。コマンドから戻っていれば、ここでその配色が解けて元に戻る
+_peacock_precmd() {
+  _PEACOCK_CMD=""
+  _PEACOCK_TARGET=""
+  _peacock_apply
+}
+
+# ---- コマンド連動 ----
+# 設定ファイルを持つコマンドを実行している間だけ、その配色にする。
+# コマンド名と当てはまった語を _PEACOCK_CMD / _PEACOCK_TARGET に入れると、
+# 解決がディレクトリの .peacock ではなく <コマンド名>.ini の当てはまるセクションを使う。
+# 元に戻すのは2つを空にして塗り直すだけでよく、
+# コマンド側にしかなかったキーは差分描画がプロファイルの色へ戻す。
+#
+# 対象にするコマンドの一覧はどこにも持たない。<コマンド名>.ini があることがフックの宣言になる。
+
+# 設定ファイルを置くディレクトリを呼び出し側の変数 dir に入れる
+_peacock_config_dir() {
+  if [[ -n "${PEACOCK_CONFIG_DIR:-}" ]]; then
+    dir="$PEACOCK_CONFIG_DIR"
+  else
+    dir="${XDG_CONFIG_HOME:-$HOME/.config}/iterm-peacock"
+  fi
+}
+
+# コマンド名に対応する設定ファイルのパスを呼び出し側の変数 file に入れる
+_peacock_config_file() {
+  local dir
+  _peacock_config_dir
+  file="$dir/$1.ini"
+}
+
+# 空白区切りのパターンのどれかが value に当てはまるかを調べる
+_peacock_matches() {
+  # zsh は case の右辺に置いた変数をパターンとして扱わないため、この関数の中だけ GLOB_SUBST を有効にする
+  [[ -z "${ZSH_VERSION:-}" ]] || setopt localoptions globsubst
+  local value="$1" patterns="$2" pattern
+  while [[ -n "$patterns" ]]; do
+    pattern="${patterns%%[[:space:]]*}"
+    if [[ "$pattern" == "$patterns" ]]; then
+      patterns=""
+    else
+      patterns="${patterns#*[[:space:]]}"
+      patterns="${patterns#"${patterns%%[![:space:]]*}"}"
+    fi
+    [[ -n "$pattern" ]] || continue
+    case "$value" in
+      $pattern) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# 設定ファイルから、target に当てはまる最初のセクションの設定を key=value の改行区切りで出力する。
+# セクション見出しは [<パターン>...]。見出しより前の行と、当てはまらないセクションの行は読み飛ばす。
+# 同じキーはセクション内の最初の行を使う
+_peacock_read_section() {
+  local file="$1" target="$2" raw line key value patterns seen=" " matched=0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      \[*\])
+        if [[ $matched -eq 1 ]]; then
+          return 0
+        fi
+        patterns="${line#\[}"
+        if _peacock_matches "$target" "${patterns%\]}"; then
+          matched=1
+        fi
+        continue
+        ;;
+    esac
+    [[ $matched -eq 1 ]] || continue
+    _peacock_parse_line "$line" || continue
+    [[ "$seen" == *" $key "* ]] && continue
+    seen="$seen$key "
+    printf '%s=%s\n' "$key" "$value"
+  done < "$file"
+}
+
+# 設定ファイルのセクションを上から順に見て、渡された語のどれかに当てはまる最初のものを探し、
+# 当てはまった語を呼び出し側の変数 target に入れる。
+# コマンドごとのオプションの文法は持たないため、- で始まる語（オプション名）だけを除いて照合する
+_peacock_match_words() {
+  local file="$1" raw line patterns word
+  shift
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        patterns="${line#\[}"
+        patterns="${patterns%\]}"
+        for word in "$@"; do
+          case "$word" in
+            -*|"") continue ;;
+          esac
+          if _peacock_matches "$word" "$patterns"; then
+            target="$word"
+            return 0
+          fi
+        done
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# コマンド行の語から、実行されるコマンド名を呼び出し側の変数 name に、
+# そのコマンド名までの語数を skip に入れる（環境変数の前置きと command を読み飛ばす）
+_peacock_command_name() {
+  skip=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      [A-Za-z_]*=*|command|\\command) shift; skip=$((skip + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [[ $# -gt 0 ]] || return 1
+  name="${1##*/}"
+  name="${name#\\}"
+  skip=$((skip + 1))
+}
+
+# ssh の引数から接続先を取り出し、呼び出し側の変数 host に入れる。
+# ssh だけはオプションの文法が分かっているため、語の総当たりではなく接続先そのものを見る。
+# ログイン以外（リモートコマンド付き、シェルを取らないオプション、接続先なし）では失敗する
+_peacock_ssh_target() {
+  local arg flags count i char takes
+  host=""
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+      --) shift; break ;;
+      -?*)
+        flags="${arg#-}"
+        count=${#flags}
+        i=0
+        takes=0
+        while [[ $i -lt $count ]]; do
+          char="${flags:$i:1}"
+          i=$((i + 1))
+          case "$char" in
+            # ログインシェルを取らない使い方なので色は変えない
+            N|f|G|O|W) return 1 ;;
+            # 値を取るオプション。同じ語に値が続いていればそれが値、なければ次の語が値
+            [BbcDEeFIiJLlmoPpQRSw])
+              if [[ $i -lt $count ]]; then
+                i=$count
+              else
+                takes=1
+              fi
+              ;;
+          esac
+        done
+        shift
+        if [[ $takes -eq 1 ]]; then
+          [[ $# -gt 0 ]] || return 1
+          shift
+        fi
+        ;;
+      *) break ;;
+    esac
+  done
+  # 接続先だけが残っていなければ、リモートコマンド付きか接続先なし
+  [[ $# -eq 1 ]] || return 1
+  host="$1"
+  case "$host" in
+    ssh://*)
+      host="${host#ssh://}"
+      host="${host%%/*}"
+      host="${host#*@}"
+      host="${host%%:*}"
+      ;;
+    *) host="${host#*@}" ;;
+  esac
+  [[ -n "$host" ]] || return 1
+}
+
+# コマンド行の語から設定に当てはまるセクションを探し、当てはまればその配色に切り替える。
+# 元に戻すのは _peacock_precmd（zsh）とラッパー（bash）が担う
+_peacock_enter() {
+  local name skip file target host
+  _peacock_command_name "$@" || return 1
+  _peacock_config_file "$name"
+  [[ -f "$file" ]] || return 1
+  shift $skip
+  if [[ "$name" == ssh ]]; then
+    _peacock_ssh_target "$@" || return 1
+    set -- "$host"
+  fi
+  _peacock_match_words "$file" "$@" || return 1
+  _PEACOCK_CMD="$name"
+  _PEACOCK_TARGET="$target"
+  _peacock_apply
+}
+
+# コマンドをラップして、実行している間だけ設定に合わせた配色にする（bash 用の入口）。
+# zsh ではプラグインの preexec が同じ役目を担うため、コマンドをラップしない
+_peacock_wrap() {
+  local name="$1" code
+  shift
+  _peacock_enter "$name" "$@" || true
+  command "$name" "$@"
+  code=$?
+  _PEACOCK_CMD=""
+  _PEACOCK_TARGET=""
+  _peacock_apply
+  return $code
+}
+
+# 設定ファイルのあるコマンドの分だけラッパー関数を定義する（bash 用）。
+# zsh と違い読み込んだ時点の顔ぶれで固定されるため、.ini を足したら読み込み直す
+_peacock_wrap_commands() {
+  local dir file name
+  _peacock_config_dir
+  [[ -d "$dir" ]] || return 0
+  for file in "$dir"/*.ini; do
+    [[ -f "$file" ]] || continue
+    name="${file##*/}"
+    name="${name%.ini}"
+    # 関数名にできない名前のファイルは、eval に渡さず読み飛ばす
+    case "$name" in
+      ""|*[!A-Za-z0-9_-]*) continue ;;
+    esac
+    eval "$name() { _peacock_wrap $name \"\$@\"; }"
+  done
 }
