@@ -1,0 +1,780 @@
+#!/usr/bin/env bash
+# iterm-peacock — カレントディレクトリの .peacock を操作する CLI
+# .peacock の探索・解釈はシェルフックと共通のものを source して使う。
+
+set -euo pipefail
+
+# シンボリックリンク経由で呼ばれてもリポジトリ内のフックを見つけられるよう実体を辿る
+_self="${BASH_SOURCE[0]}"
+while [[ -L "$_self" ]]; do
+  _link="$(readlink "$_self")"
+  [[ "$_link" == /* ]] && _self="$_link" || _self="$(dirname "$_self")/$_link"
+done
+# shellcheck source=../iterm-peacock.sh
+source "$(cd "$(dirname "$_self")/.." && pwd)/iterm-peacock.sh"
+
+# ヘルプは .peacock の仕様の一次情報として扱う。README ではなく手元のこの出力が常に版と一致するため、
+# 詳細はトピックに分けてここに置き、README からはこちらへ誘導する。
+# 利用者が人間でも coding agent でも最初に読む場所になるよう、全文を英語で書く。
+_usage() {
+  cat <<'EOF'
+iterm-peacock — per-directory iTerm2 colors, driven by a .peacock file.
+
+Usage:
+  iterm-peacock                     Pick a scheme interactively and write ./.peacock
+  iterm-peacock show                Print the settings in effect and where they come from
+  iterm-peacock set <color>         Set background in ./.peacock
+  iterm-peacock set <key> <value>   Set any key in ./.peacock (e.g. set badge My Project)
+  iterm-peacock unset               Delete ./.peacock
+  iterm-peacock unset <key>         Remove one key from ./.peacock
+  iterm-peacock where               Print the path of the .peacock in effect
+  iterm-peacock help [topic]        Show this help, or one of the topics below
+
+Topics:
+  config    .peacock file format, every key it accepts, and how a file is chosen
+  picker    Keys and behavior of the interactive picker
+
+Keys (details: iterm-peacock help config):
+  background foreground tab cursor selection selection-text    color
+  black red green yellow blue magenta cyan white               color, ANSI 0-7
+  bright-black bright-red ... bright-white                     color, ANSI 8-15
+  badge                                                        text
+  cursor-guide                                                 yes / no
+
+Colors are #rrggbb or #rgb, and the # may be omitted.
+
+set and unset only touch ./.peacock. The shell hook picks the nearest .peacock by
+walking up from the current directory, so the file you edit is not always the one
+in effect; `iterm-peacock where` prints the one that is.
+
+Requires iTerm2. Other terminals ignore the escape sequences and nothing changes.
+
+If you are a coding agent, run `iterm-peacock help config` before writing a .peacock
+by hand, and prefer `iterm-peacock set <key> <value>`, which validates the value.
+EOF
+}
+
+_help_config() {
+  cat <<'EOF'
+.peacock format
+
+One key=value per line. Spaces around the = are ignored.
+Colors are #rrggbb or #rgb, and the # may be omitted.
+A line holding nothing but a color (#1a0a0a) is read as background.
+A line starting with # is a comment, and a space-# -space sequence starts a trailing
+comment, so the # in `badge=C# app` stays part of the value.
+If the same key appears more than once, the first line wins.
+Unknown keys and unparsable values are ignored; `iterm-peacock show` warns about them.
+
+Keys:
+  background         color    Background color
+  foreground         color    Text color
+  tab                color    Tab color; falls back to background
+  cursor             color    Cursor color
+  selection          color    Background of selected text
+  selection-text     color    Color of selected text
+  black red green yellow blue magenta cyan white
+                     color    ANSI colors 0-7
+  bright-black bright-red bright-green bright-yellow
+  bright-blue bright-magenta bright-cyan bright-white
+                     color    ANSI colors 8-15
+  badge              text     Text drawn large in the top right corner
+  cursor-guide       yes/no   Highlight the line the cursor is on
+
+Which file applies:
+  The shell hook walks up from the current directory and uses the nearest .peacock.
+  Leaving that directory restores the colors from the iTerm2 profile. badge is cleared
+  and cursor-guide goes back to no, because iTerm2 cannot report the profile values
+  back and there is nothing to restore them to.
+  `iterm-peacock where` prints the path in effect, `iterm-peacock show` the settings.
+
+Not supported:
+  Bold, link, underline and cursor-text colors. iTerm2 has no escape sequence that
+  restores them to the profile, so leaving a directory could not undo them.
+
+Example:
+  # .peacock
+  background=#1a0a0a
+  foreground=#f0e6d2
+  badge=PROD
+
+Writing the file:
+  `iterm-peacock set <key> <value>` validates and normalizes the value, replaces an
+  existing line where it stands, and leaves comments and other keys untouched.
+  Editing by hand works too; nothing is generated or cached.
+EOF
+}
+
+_help_picker() {
+  cat <<'EOF'
+Interactive picker — `iterm-peacock` with no arguments
+
+An options section (badge, cursor guide) sits above a list of 10 color schemes. Each
+row is one complete scheme, and the selected row is applied to the terminal live, so
+the list is previewed rather than described.
+
+Columns:
+  BG       background
+  Text     foreground
+  Tab      tab
+  Cursor   cursor
+  Select   a sample drawn in selection-text over selection
+  Sample   `$ sample` in foreground, plus err/ok/warn/info in ANSI red/green/yellow/blue
+
+Keys:
+  Up / Down   Move through the options and the list as one sequence; wraps at both ends
+  Space       Toggle the focused option row; does nothing on a color row
+  Tab         Load another 10 schemes
+  Enter       Save the selected scheme and the options to ./.peacock and exit
+  Esc         Exit without saving and restore the previous colors (Ctrl+C, Ctrl+D too)
+
+How the schemes are generated:
+  The first page is derived from the directory name, so the same name always starts
+  from the same page.
+  Each row shifts the background hue by the golden angle (about 137.5 degrees) and
+  cycles both the tab/foreground relationship (monochrome, complementary, analogous,
+  triadic, split complementary) and the background lightness.
+  Backgrounds are dark. WCAG contrast against the background is at least 7 for
+  foreground and 4.5 for the ANSI colors; selected text is at least 4.5 against the
+  selection background.
+
+Notes:
+  The cursor is hidden while the picker runs, so judge the cursor color from the Cursor
+  column. The hidden cursor sits on the selected row, which is why turning on the
+  cursor guide highlights that row.
+  Badge defaults to the directory name. If .peacock already has a badge, that text is
+  used instead and the option starts on.
+  iTerm2 applies color changes one at a time, so after each redraw the picker asks the
+  terminal for a status report (ESC [ 5 n) and waits for the reply (ESC [ 0 n) before
+  accepting the next key. Keys that arrive in between are dropped, so holding a key
+  down does not queue up input. Esc is taken immediately and Enter as soon as the
+  redraw finishes. On terminals that never answer, the handshake happens once at
+  startup and is then skipped.
+  An existing .peacock keeps its other lines and comments; only the keys above, badge
+  and cursor-guide are rewritten.
+  The picker needs a terminal. In a script or a pipeline, use `iterm-peacock show`.
+EOF
+}
+
+_help() {
+  case "${1:-}" in
+    "") _usage ;;
+    config) _help_config ;;
+    picker) _help_picker ;;
+    *)
+      echo "iterm-peacock: unknown help topic '$1' (topics: config, picker)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+_die() {
+  echo "iterm-peacock: $*" >&2
+  exit 1
+}
+
+_is_key() {
+  _peacock_is_color_key "$1" || [[ "$1" == badge || "$1" == cursor-guide ]]
+}
+
+# .peacock の内容を書き直して出力する。target キーとして解釈される最初の行を replacement に置き換え、
+# 同じキーの2行目以降は取り除く（replacement が空なら削除だけ行う）。コメントや他のキーの行はそのまま残す。
+# target キーの行がなければ 1 を返す
+_rewrite() {
+  local file="$1" target="$2" replacement="$3" raw key value found=1
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    if _peacock_parse_line "$raw" && [[ "$key" == "$target" ]]; then
+      [[ $found -eq 1 && -n "$replacement" ]] && printf '%s\n' "$replacement"
+      found=0
+      continue
+    fi
+    printf '%s\n' "$raw"
+  done < "$file"
+  return $found
+}
+
+# .peacock の内容 content に、引数の key=value 行をまとめて反映した内容を出力する。
+#   - 各キーとして解釈される最初の行をその位置で置き換え、同じキーの2行目以降は取り除く
+#   - content にないキーは末尾に足す
+#   - 値が空の key=（例: badge=）はそのキーの行を取り除く
+# コメントや対象外のキーの行はそのまま残す
+_merge() {
+  local content="$1" raw key value hex pair written=" "
+  shift
+  if [[ -n "$content" ]]; then
+    while IFS= read -r raw || [[ -n "$raw" ]]; do
+      if _peacock_parse_line "$raw" && _merge_find "$key" "$@"; then
+        if [[ "$written" != *" $key "* ]]; then
+          written="$written$key "
+          if [[ -n "${pair#*=}" ]]; then
+            printf '%s\n' "$pair"
+          fi
+        fi
+        continue
+      fi
+      printf '%s\n' "$raw"
+    done <<< "$content"
+  fi
+  for pair in "$@"; do
+    if [[ "$written" != *" ${pair%%=*} "* && -n "${pair#*=}" ]]; then
+      printf '%s\n' "$pair"
+    fi
+  done
+}
+
+# key=value 行の並びから target キーの行を探し、呼び出し側の変数 pair に入れる。なければ失敗する
+# （ピッカーでキー操作のたびに呼ばれるため、サブシェルを使わず動的スコープで返している）
+_merge_find() {
+  local target="$1" candidate
+  shift
+  for candidate in "$@"; do
+    if [[ "${candidate%%=*}" == "$target" ]]; then
+      pair="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 空行・コメント以外で解釈できなかった行（未対応のキーや不正な値）を標準エラーに知らせる
+_warn_ignored() {
+  local file="$1" raw trimmed key value hex
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_parse_line "$raw" && continue
+    trimmed="${raw#"${raw%%[![:space:]]*}"}"
+    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+    echo "iterm-peacock: ignored: $raw" >&2
+  done < "$file"
+}
+
+_show() {
+  local file=""
+  if ! file="$(_peacock_find)"; then
+    echo "no .peacock"
+    return 0
+  fi
+  echo "# $file"
+  _warn_ignored "$file"
+  [[ -n "$(_peacock_read "$file")" ]] || _die "no valid settings in $file"
+  _peacock_resolve
+}
+
+# ---- 配色ピッカー ----
+
+# 1ページに並べる候補の数
+_PICK_ROWS=10
+
+# ディレクトリ名から最初の候補の色相（0〜359）を決める。同じ名前なら毎回同じ色から始まる
+_hue_of_dir() {
+  local crc
+  crc="$(printf '%s' "${PWD##*/}" | cksum)"
+  echo $(( ${crc%% *} % 360 ))
+}
+
+# page ページ目の候補を1行に1つ、次の10色の rrggbb を空白区切りで出力する。
+#   背景 文字 タブ カーソル 選択範囲 選択範囲の文字 赤 緑 黄 青
+# 候補ごとに背景の色相を黄金角（約137.5°）ずつずらし、タブと文字色の色相の組み合わせ方（同系色・補色など）と
+# 背景の濃さも入れ替えて、似た候補が並ばないようにする。
+# 文字色は背景とのコントラスト比（WCAG）が 7 以上、選択範囲の文字と ANSI 色は 4.5 以上になる明るさにする
+_suggest_page() {
+  awk -v h0="$1" -v page="$2" -v rows="$_PICK_ROWS" '
+    function abs(x) { return x < 0 ? -x : x }
+    # HSL を rrggbb にし、グローバルの R G B にも 0〜255 で残す
+    function hsl(h, s, l,   c, hp, x, r, g, b, m) {
+      c = (1 - abs(2 * l - 1)) * s
+      hp = h / 60
+      x = c * (1 - abs(hp % 2 - 1))
+      if (hp < 1)      { r = c; g = x; b = 0 }
+      else if (hp < 2) { r = x; g = c; b = 0 }
+      else if (hp < 3) { r = 0; g = c; b = x }
+      else if (hp < 4) { r = 0; g = x; b = c }
+      else if (hp < 5) { r = x; g = 0; b = c }
+      else             { r = c; g = 0; b = x }
+      m = l - c / 2
+      R = int((r + m) * 255 + 0.5); G = int((g + m) * 255 + 0.5); B = int((b + m) * 255 + 0.5)
+      return sprintf("%02x%02x%02x", R, G, B)
+    }
+    function channel(v) { v = v / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ^ 2.4 }
+    function luminance() { return 0.2126 * channel(R) + 0.7152 * channel(G) + 0.0722 * channel(B) }
+    # 背景の輝度 bgl に対してコントラスト比が ratio 以上になるまで明るくした色
+    function readable(h, s, l, bgl, ratio,   c) {
+      for (; l <= 1; l += 0.02) {
+        c = hsl(h, s, l)
+        if ((luminance() + 0.05) / (bgl + 0.05) >= ratio) break
+      }
+      return c
+    }
+    BEGIN {
+      # 組み合わせ方: 同系色 / 補色 / 類似色 / 三角配色 / 分裂補色
+      # （背景の色相に対する、タブと文字色の色相のずれと、文字色の彩度）
+      split("0 180 40 120 150", tabShift, " ")
+      split("0 180 0 0 30", textShift, " ")
+      split("0.20 0.15 0.20 0.04 0.15", textSat, " ")
+      for (i = 0; i < rows; i++) {
+        k = page * rows + i
+        t = k % 5 + 1
+        h = (h0 + k * 137.508) % 360
+        th = (h + tabShift[t]) % 360
+        bgS = (k % 2) ? 0.30 : 0.45
+        bgL = (k % 2) ? 0.16 : 0.12
+        bg = hsl(h, bgS, bgL)
+        bgl = luminance()
+        fg = readable((h + textShift[t]) % 360, textSat[t], 0.85, bgl, 7)
+        tab = hsl(th, 0.75, 0.55)
+        cursor = hsl(th, 0.90, 0.65)
+        sel = hsl(h, bgS + 0.10, bgL + 0.12)
+        sell = luminance()
+        selText = readable(h, 0.10, 0.85, sell, 4.5)
+        red = readable(0, 0.75, 0.55, bgl, 4.5)
+        green = readable(120, 0.60, 0.45, bgl, 4.5)
+        yellow = readable(50, 0.80, 0.50, bgl, 4.5)
+        blue = readable(215, 0.80, 0.60, bgl, 4.5)
+        print bg, fg, tab, cursor, sel, selText, red, green, yellow, blue
+      }
+    }'
+}
+
+# rrggbb を 24bit カラー指定用の r;g;b にして、呼び出し側の変数 rgb に入れる
+_rgb() {
+  rgb="$((16#${1:0:2}));$((16#${1:2:2}));$((16#${1:4:2}))"
+}
+
+# 6文字幅の色見本
+_swatch() {
+  local rgb
+  _rgb "$1"
+  printf '\e[48;2;%sm      \e[0m' "$rgb"
+}
+
+# 背景色 bg の上に、文字色 fg で text を書いた見本
+_sample() {
+  local rgb bgc
+  _rgb "$1"; bgc="$rgb"
+  _rgb "$2"
+  printf '\e[48;2;%s;38;2;%sm%s\e[0m' "$bgc" "$rgb" "$3"
+}
+
+# 背景色の上に「$ sample」を文字色で、続けて見本の単語を ANSI の赤・緑・黄・青で書いたもの
+# 引数: 背景 文字 赤 緑 黄 青
+_text_sample() {
+  local rgb
+  _rgb "$1"; printf '\e[48;2;%sm ' "$rgb"
+  _rgb "$2"; printf '\e[38;2;%sm$ sample ' "$rgb"
+  _rgb "$3"; printf '\e[38;2;%smerr ' "$rgb"
+  _rgb "$4"; printf '\e[38;2;%smok ' "$rgb"
+  _rgb "$5"; printf '\e[38;2;%smwarn ' "$rgb"
+  _rgb "$6"; printf '\e[38;2;%sminfo \e[0m' "$rgb"
+}
+
+# ピッカーの状態。終了時の後始末（trap）からも参照するためグローバルに置く
+_pick_tty=""
+_pick_before=""
+_pick_shown=""
+_pick_saved=0
+# 描いた一覧の先頭行から数えた、今カーソルがある行（描き直し・消去のときにここから先頭へ戻る）
+_pick_cursor_row=0
+_pick_current=""
+_pick_content=""
+_pick_hue0=0
+_pick_page=0
+# 試し表示している色の候補の行（0〜9）
+_pick_sel=0
+# ↑↓ で動かす行。0: Badge、1: Cursor guide、2 以降: 色の候補（2 + 行番号）
+_pick_focus=2
+_pick_key=""
+_pick_rows=()
+_pick_badge=0
+_pick_badge_text=""
+_pick_guide=0
+
+_pick_load_page() {
+  local line
+  _pick_rows=()
+  while IFS= read -r line; do
+    _pick_rows+=("$line")
+  done < <(_suggest_page "$_pick_hue0" "$_pick_page")
+}
+
+# 既存の .peacock からバッジとカーソルガイドの初期状態を決める。バッジの文字がなければディレクトリ名を使う
+_pick_load_toggles() {
+  local line
+  _pick_badge_text="${PWD##*/}"
+  while IFS= read -r line; do
+    case "$line" in
+      badge=*) _pick_badge=1; _pick_badge_text="${line#badge=}" ;;
+      cursor-guide=yes) _pick_guide=1 ;;
+    esac
+  done <<< "$(_peacock_read /dev/stdin <<< "$_pick_current")"
+}
+
+# 選んでいる候補とバッジ・カーソルガイドの切り替えを .peacock の内容にし、その配色を端末に反映する
+_pick_preview() {
+  local candidate badge="badge=" guide="cursor-guide="
+  # 行は16進数の色だけなので、空白で分割して位置引数にしている
+  # shellcheck disable=SC2086
+  set -- ${_pick_rows[_pick_sel]}
+  (( _pick_badge )) && badge="badge=$_pick_badge_text"
+  (( _pick_guide )) && guide="cursor-guide=yes"
+  _pick_content="$(_merge "$_pick_current" \
+    "background=#$1" "foreground=#$2" "tab=#$3" "cursor=#$4" \
+    "selection=#$5" "selection-text=#$6" \
+    "red=#$7" "green=#$8" "yellow=#$9" "blue=#${10}" \
+    "$badge" "$guide")"
+  candidate="$(_peacock_finalize "$(_peacock_read /dev/stdin <<< "$_pick_content")")"
+  _peacock_render "$_pick_shown" "$candidate"
+  _pick_shown="$candidate"
+}
+
+# 設定欄の1行。focus が自分の行ならカーソル記号を付ける
+_pick_setting_row() {
+  local index="$1" label="$2" state="$3" detail="$4" mark=" " value=off
+  (( _pick_focus == index )) && mark="❯"
+  (( state )) && value=on
+  printf '\e[K%s %-29s%-5s%s\n' "$mark" "$label" "$value" "$detail"
+}
+
+# 描いた一覧の先頭行に戻る
+_pick_to_top() {
+  printf '\r'
+  if (( _pick_cursor_row > 0 )); then
+    printf '\e[%dA' "$_pick_cursor_row"
+  fi
+  _pick_cursor_row=0
+}
+
+# ピッカーの画面の上下に引く線。コマンドを打った行とピッカーの境目をわかりやすくする
+_PICK_FRAME='= = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = ='
+
+# 段落の見出し。反転表示（SGR 7）にして、設定の行や候補の行と見分けやすくする
+_pick_title() {
+  printf '\e[K\e[7m %s \e[0m\n' "$1"
+}
+
+# 設定欄・候補の一覧・操作説明を描き直す。行の並び:
+#   0: 空行  1: 上の線  2: Options 見出し  3: Badge  4: Cursor guide  5: Space の説明  6: 区切り線
+#   7: Colors 見出し  8: 列見出し  9〜18: 色の候補  19: 空行  20〜21: 操作説明  22: 下の線
+# 描き終えたらカーソルを ↑↓ で選んでいる行に置く（カーソルガイドのハイライトがその行に出る）
+_pick_draw() {
+  local i mark last focus_line
+  _pick_to_top
+  printf '\e[K\n'
+  printf '\e[K%s\n' "$_PICK_FRAME"
+  _pick_title Options
+  _pick_setting_row 0 Badge "$_pick_badge" "$_pick_badge_text"
+  _pick_setting_row 1 "Cursor guide" "$_pick_guide" ""
+  printf '\e[KSpace: toggle\n'
+  printf '\e[K────────────────────────────────────────────────────────────────────────\n'
+  _pick_title Colors
+  printf '\e[K    %-8s%-8s%-8s%-8s%-10s%s\n' BG Text Tab Cursor Select Sample
+  for (( i = 0; i < _PICK_ROWS; i++ )); do
+    # shellcheck disable=SC2086
+    set -- ${_pick_rows[i]}
+    mark=" "
+    (( _pick_focus == i + 2 )) && mark="❯"
+    printf '\e[K%s   ' "$mark"
+    _swatch "$1"; printf '  '
+    _swatch "$2"; printf '  '
+    _swatch "$3"; printf '  '
+    _swatch "$4"; printf '  '
+    _sample "$5" "$6" ' select '
+    printf '  '
+    _text_sample "$1" "$2" "$7" "$8" "$9" "${10}"
+    printf '\n'
+  done
+  printf '\e[K\n'
+  printf '\e[K↑↓: move  Space: toggle  Tab: more colors\n'
+  printf '\e[KEnter: save  Esc: cancel\n'
+  printf '\e[K%s' "$_PICK_FRAME"
+
+  last=$((_PICK_ROWS + 12))
+  if (( _pick_focus < 2 )); then
+    focus_line=$((_pick_focus + 3))
+  else
+    focus_line=$((_pick_focus + 7))
+  fi
+  printf '\r\e[%dA' $((last - focus_line))
+  _pick_cursor_row=$focus_line
+}
+
+# 描いた一覧を消す
+_pick_erase() {
+  _pick_to_top
+  printf '\e[J'
+}
+
+# 1キー読み、_pick_key に up / down / tab / toggle / enter / cancel / other を入れる
+_pick_read_key() {
+  local k rest c=""
+  # 末尾の改行が $(...) で消えないよう番兵の x を付けて読み、入力の終わり（空）と Ctrl+J（\n）を区別する
+  k="$(dd bs=1 count=1 2>/dev/null; printf x)"
+  k="${k%x}"
+  case "$k" in
+    $'\t') _pick_key=tab ;;
+    ' ') _pick_key=toggle ;;
+    $'\r'|$'\n') _pick_key=enter ;;
+    $'\004'|'') _pick_key=cancel ;;
+    $'\e')
+      # 矢印キーなどは ESC に続けて文字が同時に届く。すぐに続きがなければ Esc 単独とみなして即座に反応する。
+      # 続きがあればそのシーケンスの終わりの文字までだけ読み、後ろに続くキー入力は残す
+      stty min 0 time 0
+      rest="$(dd bs=1 count=1 2>/dev/null)"
+      if [[ "$rest" == "[" ]]; then
+        while :; do
+          c="$(dd bs=1 count=1 2>/dev/null)"
+          case "$c" in
+            ''|[[:alpha:]]|'~') break ;;
+          esac
+        done
+      elif [[ "$rest" == O ]]; then
+        c="$(dd bs=1 count=1 2>/dev/null)"
+      fi
+      stty min 1 time 0
+      case "$rest$c" in
+        '') _pick_key=cancel ;;
+        '[A'|OA) _pick_key=up ;;
+        '[B'|OB) _pick_key=down ;;
+        *) _pick_key=other ;;
+      esac
+      ;;
+    *) _pick_key=other ;;
+  esac
+}
+
+# ---- 端末との同期 ----
+# iTerm2 は配色の変更を1件ずつ処理するため、↑↓ を押しっぱなしにすると処理が追いつかず、
+# 溜まったキー入力の後ろに Esc が並んで反応しなくなる。
+# そこで描き終えるたびに状態報告の要求（DSR: ESC [ 5 n）を送り、端末がそれまでの出力を処理し終えて
+# 返す ESC [ 0 n を待つ。待つ間に届いたキー入力は捨て、Esc / Ctrl+D と Enter だけは拾う。
+# DSR に応答しない環境では、起動時の確認で同期を無効にし、溜まった入力を捨てるだけにする
+
+_PICK_DSR=$'\e[5n'
+_PICK_DSR_REPLY=$'\e[0n'
+# 1: 端末が DSR に応答する、0: 応答しない、空: まだ確かめていない
+_pick_sync=""
+# 応答を待っている DSR の数（終了時に受け取り切って、シェルに漏らさないため）
+_pick_dsr_waiting=0
+# 同期の間に拾ったキー（cancel / enter / 空）
+_pick_pending=""
+
+# 同期の間に届いた入力から、捨てずに扱うキーを探して _pick_pending に入れる。
+# 矢印キーなどのエスケープシーケンスを除いた後に ESC が残っていれば単独の Esc キー
+_pick_scan() {
+  local buf="$1" esc=$'\e' rest
+  buf="${buf//$_PICK_DSR_REPLY/}"
+  buf="${buf//${esc}\[[ABCD]/}"
+  buf="${buf//${esc}O[ABCD]/}"
+  rest="${buf//${esc}[\[O]/}"
+  case "$rest" in
+    *"$esc"*|*$'\004'*) _pick_pending=cancel ;;
+    *$'\r'*|*$'\n'*) [[ "$_pick_pending" == cancel ]] || _pick_pending=enter ;;
+  esac
+}
+
+# 端末から届いている入力を読み捨てながら、DSR の応答を最大 tenths × 0.1 秒待つ。
+# 応答をすべて受け取るか、Esc を見つけるか、時間切れで待つのをやめ、最後にすでに届いている入力を読み捨てる
+_pick_collect() {
+  local tenths="$1" buf="" chunk tries=0 replies
+  stty min 0 time 1
+  while (( _pick_dsr_waiting > 0 && tries < tenths )); do
+    chunk="$(dd bs=256 count=1 2>/dev/null; printf x)"
+    chunk="${chunk%x}"
+    if [[ -z "$chunk" ]]; then
+      tries=$((tries + 1))
+      continue
+    fi
+    buf="$buf$chunk"
+    # 届いた応答の数を、ESC [ 0 n を1文字に置き換えて数える
+    replies="${buf//$_PICK_DSR_REPLY/@}"
+    replies="${replies//[!@]/}"
+    if (( ${#replies} >= _pick_dsr_waiting )); then
+      _pick_dsr_waiting=0
+    fi
+    _pick_scan "$buf"
+    [[ "$_pick_pending" != cancel ]] || break
+  done
+  stty min 0 time 0
+  while chunk="$(dd bs=256 count=1 2>/dev/null; printf x)"; chunk="${chunk%x}"; [[ -n "$chunk" ]]; do
+    buf="$buf$chunk"
+  done
+  _pick_scan "$buf"
+  stty min 1 time 0
+}
+
+# 描き終えた後、端末が処理し終えるのを待つ。起動直後の1回目で DSR に応答するかを確かめる
+_pick_settle() {
+  _pick_pending=""
+  if [[ "$_pick_sync" != 0 ]]; then
+    printf '%s' "$_PICK_DSR"
+    _pick_dsr_waiting=$((_pick_dsr_waiting + 1))
+  fi
+  if [[ -z "$_pick_sync" ]]; then
+    # 応答するかどうかの確認は短めに待つ（応答しない端末で起動が遅くならないように）
+    _pick_collect 5
+    if (( _pick_dsr_waiting == 0 )); then _pick_sync=1; else _pick_sync=0; fi
+  elif [[ "$_pick_sync" == 1 ]]; then
+    _pick_collect 10
+  else
+    _pick_collect 0
+  fi
+}
+
+# 終了時（Ctrl+C を含む）に端末の状態を戻す。保存しなかった場合は試し表示した配色も元に戻す
+_pick_cleanup() {
+  if [[ -n "$_pick_tty" ]]; then
+    _pick_erase
+    if [[ $_pick_saved -eq 1 ]]; then
+      printf 'saved -> %s\n' "$PWD/.peacock"
+    else
+      printf 'canceled\n'
+    fi
+  fi
+  if [[ $_pick_saved -eq 0 && "$_pick_shown" != "$_pick_before" ]]; then
+    _peacock_render "$_pick_shown" "$_pick_before"
+  fi
+  printf '\e[?25h'
+  if [[ -n "$_pick_tty" ]]; then
+    # 画面を消した後で、応答待ちの DSR と押しっぱなしで溜まったキー入力を読み捨て、シェルの入力に漏らさない
+    _pick_collect 5
+    stty "$_pick_tty"
+  fi
+}
+
+# 設定欄（バッジ・カーソルガイド）と配色の候補の一覧を出し、選んでいる候補をその場で端末に反映する。
+# ↑↓ で設定欄と一覧を行き来し、設定の行では Space で切り替え、Tab で別の候補の一覧、
+# Enter で .peacock に保存、Esc / Ctrl+D / Ctrl+C でやめる
+_pick() {
+  [[ -t 0 && -t 1 ]] || _die "the color picker needs a terminal (use 'iterm-peacock show' to print settings, or 'iterm-peacock help picker')"
+  local dirty=1
+
+  if [[ -f .peacock ]]; then
+    _pick_current="$(<.peacock)"
+  fi
+  _pick_hue0="$(_hue_of_dir)"
+  _pick_before="$(_peacock_resolve)"
+  _pick_shown="$_pick_before"
+  _pick_load_toggles
+  _pick_load_page
+
+  trap _pick_cleanup EXIT
+  trap 'exit 130' INT TERM
+  _pick_tty="$(stty -g)"
+  # 1文字ずつ読み、Enter を \r のまま受け取る。Ctrl+C はシグナルのまま残す
+  stty -icanon -echo -icrnl min 1 time 0
+  printf '\e[?25l'
+
+  while :; do
+    if (( dirty )); then
+      _pick_preview
+      _pick_draw
+      _pick_settle
+    fi
+    dirty=1
+    # 端末の処理を待つ間に Esc / Enter が押されていれば、次のキーを読まずにそれを扱う
+    if [[ -n "$_pick_pending" ]]; then
+      _pick_key="$_pick_pending"
+      _pick_pending=""
+    else
+      _pick_read_key
+    fi
+    case "$_pick_key" in
+      up|down)
+        # 設定欄の2行と色の候補の行をひと続きに動き、端まで行くと反対側に戻る
+        if [[ "$_pick_key" == up ]]; then
+          _pick_focus=$(( (_pick_focus + _PICK_ROWS + 1) % (_PICK_ROWS + 2) ))
+        else
+          _pick_focus=$(( (_pick_focus + 1) % (_PICK_ROWS + 2) ))
+        fi
+        if (( _pick_focus >= 2 )); then
+          _pick_sel=$((_pick_focus - 2))
+        fi
+        ;;
+      tab)
+        _pick_page=$((_pick_page + 1))
+        _pick_sel=0
+        (( _pick_focus < 2 )) || _pick_focus=2
+        _pick_load_page
+        ;;
+      toggle)
+        case "$_pick_focus" in
+          0) _pick_badge=$(( 1 - _pick_badge )) ;;
+          1) _pick_guide=$(( 1 - _pick_guide )) ;;
+          *) dirty=0 ;;
+        esac
+        ;;
+      enter)
+        printf '%s\n' "$_pick_content" > .peacock
+        _pick_saved=1
+        # 保存の表示は終了時の _pick_cleanup で行う
+        return 0
+        ;;
+      cancel) return 0 ;;
+      *) dirty=0 ;;
+    esac
+  done
+}
+
+_main() {
+  local line content file
+  hex=""
+  key=""
+  value=""
+
+  case "${1:-}" in
+    "")
+      _pick
+      ;;
+    show)
+      _show
+      ;;
+    set)
+      if [[ $# -eq 2 ]]; then
+        key=background
+        value="$2"
+      elif [[ $# -ge 3 ]]; then
+        key="$2"
+        value="${*:3}"
+      else
+        _usage >&2
+        exit 1
+      fi
+      _is_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+      # フックと同じ解釈を通して値を検証・正規化する
+      _peacock_parse_line "$key=$value" || _die "invalid value for $key: '$value' (run: iterm-peacock help config)"
+      line="$key=$value"
+      content=""
+      if [[ -f .peacock ]]; then
+        content="$(<.peacock)"
+      fi
+      printf '%s\n' "$(_merge "$content" "$line")" > .peacock
+      echo "$line -> $PWD/.peacock"
+      ;;
+    unset)
+      [[ -f .peacock ]] || _die "no .peacock in $PWD"
+      if [[ $# -eq 1 ]]; then
+        rm .peacock
+        return 0
+      fi
+      _is_key "$2" || _die "unknown key '$2' (run: iterm-peacock help config)"
+      content="$(_rewrite .peacock "$2" "")" || _die "no $2 in $PWD/.peacock"
+      if [[ -n "$content" ]]; then
+        printf '%s\n' "$content" > .peacock
+      else
+        rm .peacock
+      fi
+      ;;
+    where)
+      file="$(_peacock_find)" || _die "no .peacock"
+      echo "$file"
+      ;;
+    -h|--help|help)
+      _help "${2:-}"
+      ;;
+    *)
+      _usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+# テストから関数だけを読み込めるよう、source されたときは実行しない
+[[ "${BASH_SOURCE[0]}" != "$0" ]] || _main "$@"
