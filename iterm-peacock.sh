@@ -17,9 +17,10 @@
 # 直前に適用した設定（key=value の改行区切り）。変化がなければ何も出力しないためのキャッシュ
 _PEACOCK_LAST=""
 
-# 設定を持つコマンドを実行している間だけ入る、コマンド名と当てはまった語。
-# 入っている間はディレクトリの代わりにこの2つで設定を決める
+# 設定を持つコマンドを実行している間だけ入る、コマンド名・当てはまったセクションの番号・バッジの既定値。
+# 入っている間はディレクトリの代わりにこれで設定を決める
 _PEACOCK_CMD=""
+_PEACOCK_SECTION=""
 _PEACOCK_TARGET=""
 
 # $PWD から親へ辿り、最初に見つかった .peacock のパスを出力する
@@ -106,6 +107,10 @@ _peacock_parse_line() {
         *) return 1 ;;
       esac
       ;;
+    # 配色ではなくコマンド連動のセクションの当たり判定。.peacock の読み込みと描画には渡さない
+    match-options)
+      _peacock_parse_conditions "$value" || return 1
+      ;;
     *)
       _peacock_is_color_key "$key" || return 1
       _peacock_normalize "$value" || return 1
@@ -119,6 +124,7 @@ _peacock_read() {
   local file="$1" raw key value seen=" "
   while IFS= read -r raw || [[ -n "$raw" ]]; do
     _peacock_parse_line "$raw" || continue
+    [[ "$key" == match-options ]] && continue
     [[ "$seen" == *" $key "* ]] && continue
     seen="$seen$key "
     printf '%s=%s\n' "$key" "$value"
@@ -131,10 +137,10 @@ _peacock_resolve() {
   if [[ -n "$_PEACOCK_CMD" ]]; then
     _peacock_config_file "$_PEACOCK_CMD"
     if [[ -f "$file" ]]; then
-      config="$(_peacock_read_section "$file" "$_PEACOCK_TARGET")"
+      config="$(_peacock_read_section "$file" "$_PEACOCK_SECTION")"
     fi
     if [[ -n "$config" ]]; then
-      # 何につないでいるかが分かる目印がなければ、当てはまった語をバッジに出す
+      # 何につないでいるかが分かる目印がなければ、当てはまった語（match-options ならセクション名）をバッジに出す
       if [[ "${PEACOCK_COMMAND_BADGE:-1}" != 0 && $'\n'"$config" != *$'\n'badge=* ]]; then
         config="$config"$'\n'"badge=$_PEACOCK_TARGET"
       fi
@@ -241,15 +247,16 @@ _peacock_apply() {
 # プロンプトを出す直前に呼ぶ。コマンドから戻っていれば、ここでその配色が解けて元に戻る
 _peacock_precmd() {
   _PEACOCK_CMD=""
+  _PEACOCK_SECTION=""
   _PEACOCK_TARGET=""
   _peacock_apply
 }
 
 # ---- コマンド連動 ----
 # 設定ファイルを持つコマンドを実行している間だけ、その配色にする。
-# コマンド名と当てはまった語を _PEACOCK_CMD / _PEACOCK_TARGET に入れると、
+# コマンド名と当てはまったセクションを _PEACOCK_CMD / _PEACOCK_SECTION / _PEACOCK_TARGET に入れると、
 # 解決がディレクトリの .peacock ではなく <コマンド名>.ini の当てはまるセクションを使う。
-# 元に戻すのは2つを空にして塗り直すだけでよく、
+# 元に戻すのはこれらを空にして塗り直すだけでよく、
 # コマンド側にしかなかったキーは差分描画がプロファイルの色へ戻す。
 #
 # 対象にするコマンドの一覧はどこにも持たない。<コマンド名>.ini があることがフックの宣言になる。
@@ -291,59 +298,197 @@ _peacock_matches() {
   return 1
 }
 
-# 設定ファイルから、target に当てはまる最初のセクションの設定を key=value の改行区切りで出力する。
-# セクション見出しは [<パターン>...]。見出しより前の行と、当てはまらないセクションの行は読み飛ばす。
-# 同じキーはセクション内の最初の行を使う
+# 空白区切りの文字列 rest から先頭の1語を呼び出し側の変数 token に取り出し、rest を残りにする。語がなければ失敗する
+_peacock_next_token() {
+  rest="${rest#"${rest%%[![:space:]]*}"}"
+  [[ -n "$rest" ]] || return 1
+  token="${rest%%[[:space:]]*}"
+  rest="${rest#"$token"}"
+}
+
+# match-options の値を検査し、条件を空白1つ区切りに揃えて呼び出し側の変数 value に入れる。
+# 条件は2種類で、- で始まるものは <オプション名>=<値のパターン>（名前は | で別名を並べ、どれも - で始まる）、
+# それ以外は語のパターン。条件が1つもない、名前か値のパターンが空なら失敗する
+_peacock_parse_conditions() {
+  local rest="$1" token names name out=""
+  while _peacock_next_token; do
+    case "$token" in
+      -*)
+        [[ "$token" == *=* && -n "${token#*=}" ]] || return 1
+        names="${token%%=*}|"
+        while [[ -n "$names" ]]; do
+          name="${names%%|*}"
+          names="${names#*|}"
+          case "$name" in
+            ""|-|--|[!-]*) return 1 ;;
+          esac
+        done
+        ;;
+    esac
+    out="${out:+$out }$token"
+  done
+  [[ -n "$out" ]] || return 1
+  value="$out"
+}
+
+# 語のどれかが空白区切りのパターンに当てはまるかを調べ、当てはまった最初の語を呼び出し側の変数 word に入れる。
+# コマンドごとのオプションの文法は持たないため、- で始まる語（オプション名）だけを除いて照合する
+_peacock_match_word() {
+  local patterns="$1"
+  shift
+  for word in "$@"; do
+    case "$word" in
+      -*|"") continue ;;
+    esac
+    _peacock_matches "$word" "$patterns" && return 0
+  done
+  return 1
+}
+
+# コマンド行の語から、names（| 区切りのオプション名）に渡された値を呼び出し側の変数 value に入れる。
+# 値を取るかどうかはコマンドの文法ではなく、設定にその名前が書かれていることで決まる。
+#   --port=V / --port V    -- で始まる名前は = の後ろか次の語
+#   -P V / -PV             - で始まる名前は次の語か、名前に続く残り
+# 同じオプションが何度もあれば最後の値を使い、-- より後ろはオプションとして読まない。値がなければ失敗する
+_peacock_option_value() {
+  local names="$1|" arg rest name found=1
+  shift
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    shift
+    [[ "$arg" != -- ]] || break
+    rest="$names"
+    while [[ -n "$rest" ]]; do
+      name="${rest%%|*}"
+      rest="${rest#*|}"
+      if [[ "$arg" == "$name" ]]; then
+        if [[ $# -gt 0 ]]; then
+          value="$1"
+          found=0
+          shift
+        fi
+        break
+      fi
+      case "$name" in
+        --*)
+          [[ "$arg" == "$name="* ]] || continue
+          value="${arg#"$name="}"
+          ;;
+        *)
+          [[ "$arg" == "$name"?* ]] || continue
+          value="${arg#"$name"}"
+          ;;
+      esac
+      found=0
+      break
+    done
+  done
+  return $found
+}
+
+# match-options の条件がすべてコマンド行の語に当てはまるかを調べ、条件の数を呼び出し側の変数 count に入れる
+_peacock_match_conditions() {
+  local rest="$1" token value word
+  shift
+  count=0
+  while _peacock_next_token; do
+    case "$token" in
+      -*)
+        _peacock_option_value "${token%%=*}" "$@" || return 1
+        _peacock_matches "$value" "${token#*=}" || return 1
+        ;;
+      *)
+        _peacock_match_word "$token" "$@" || return 1
+        ;;
+    esac
+    count=$((count + 1))
+  done
+}
+
+# 設定ファイルのセクションからコマンド行の語に当てはまるものを選び、その番号（見出しを上から数えて1始まり）を
+# 呼び出し側の変数 section に、バッジの既定値を target に入れる。当てはまるものがなければ失敗する。
+#   - match-options のないセクションは、見出しのパターンのどれかに語が当たれば当てはまる。
+#     条件の数は1で、バッジの既定値は当てはまった語
+#   - match-options のあるセクションは、見出しをパターンではなく名前として扱い、条件がすべて当たれば当てはまる。
+#     条件の数は並べた数で、バッジの既定値は見出しの名前。最初の match-options の行が読めなければ当てはまらない
+# 当てはまったうち条件の数が最も多いものを選び、同じ数なら後に書いたものを選ぶ（具体的に書いた方が勝つ）
+_peacock_find_section() {
+  local file="$1" raw line key value index=0 header="" options="" kind="" best=0
+  shift
+  section=""
+  target=""
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        _peacock_rank_section "$@"
+        index=$((index + 1))
+        header="${line#\[}"
+        header="${header%\]}"
+        options=""
+        kind=""
+        ;;
+      match-options*)
+        [[ $index -gt 0 && -z "$kind" ]] || continue
+        key="${line%%=*}"
+        [[ "${key%"${key##*[![:space:]]}"}" == match-options ]] || continue
+        if _peacock_parse_line "$line"; then
+          options="$value"
+          kind=ok
+        else
+          kind=broken
+        fi
+        ;;
+    esac
+  done < "$file"
+  _peacock_rank_section "$@"
+  [[ -n "$section" ]]
+}
+
+# _peacock_find_section が読み終えた1つのセクションを評価し、それまでの候補より優先するなら入れ替える
+_peacock_rank_section() {
+  local count word
+  [[ $index -gt 0 ]] || return 0
+  case "$kind" in
+    broken) return 0 ;;
+    ok)
+      _peacock_match_conditions "$options" "$@" || return 0
+      word="$header"
+      ;;
+    *)
+      _peacock_match_word "$header" "$@" || return 0
+      count=1
+      ;;
+  esac
+  [[ $count -ge $best ]] || return 0
+  best=$count
+  section=$index
+  target="$word"
+}
+
+# 設定ファイルの index 番目（見出しを上から数えて1始まり）のセクションの設定を key=value の改行区切りで出力する。
+# 見出しより前の行とほかのセクションの行は読み飛ばす。同じキーはセクション内の最初の行を使い、
+# match-options は配色の設定ではないため出力しない
 _peacock_read_section() {
-  local file="$1" target="$2" raw line key value patterns seen=" " matched=0
+  local file="$1" index="$2" raw line key value seen=" " current=0
+  [[ -n "$index" ]] || return 0
   while IFS= read -r raw || [[ -n "$raw" ]]; do
     _peacock_strip "$raw"
     [[ -n "$line" ]] || continue
     case "$line" in
       \[*\])
-        if [[ $matched -eq 1 ]]; then
-          return 0
-        fi
-        patterns="${line#\[}"
-        if _peacock_matches "$target" "${patterns%\]}"; then
-          matched=1
-        fi
+        [[ $current -ne $index ]] || return 0
+        current=$((current + 1))
         continue
         ;;
     esac
-    [[ $matched -eq 1 ]] || continue
+    [[ $current -eq $index ]] || continue
     _peacock_parse_line "$line" || continue
+    [[ "$key" != match-options ]] || continue
     [[ "$seen" == *" $key "* ]] && continue
     seen="$seen$key "
     printf '%s=%s\n' "$key" "$value"
   done < "$file"
-}
-
-# 設定ファイルのセクションを上から順に見て、渡された語のどれかに当てはまる最初のものを探し、
-# 当てはまった語を呼び出し側の変数 target に入れる。
-# コマンドごとのオプションの文法は持たないため、- で始まる語（オプション名）だけを除いて照合する
-_peacock_match_words() {
-  local file="$1" raw line patterns word
-  shift
-  while IFS= read -r raw || [[ -n "$raw" ]]; do
-    _peacock_strip "$raw"
-    case "$line" in
-      \[*\])
-        patterns="${line#\[}"
-        patterns="${patterns%\]}"
-        for word in "$@"; do
-          case "$word" in
-            -*|"") continue ;;
-          esac
-          if _peacock_matches "$word" "$patterns"; then
-            target="$word"
-            return 0
-          fi
-        done
-        ;;
-    esac
-  done < "$file"
-  return 1
 }
 
 # コマンド行の語から、実行されるコマンド名を呼び出し側の変数 name に、
@@ -421,7 +566,7 @@ _peacock_ssh_target() {
 # コマンド行の語から設定に当てはまるセクションを探し、当てはまればその配色に切り替える。
 # 元に戻すのは _peacock_precmd（zsh）とラッパー（bash）が担う
 _peacock_enter() {
-  local name skip file target host
+  local name skip file section target host
   _peacock_command_name "$@" || return 1
   _peacock_config_file "$name"
   [[ -f "$file" ]] || return 1
@@ -430,8 +575,9 @@ _peacock_enter() {
     _peacock_ssh_target "$@" || return 1
     set -- "$host"
   fi
-  _peacock_match_words "$file" "$@" || return 1
+  _peacock_find_section "$file" "$@" || return 1
   _PEACOCK_CMD="$name"
+  _PEACOCK_SECTION="$section"
   _PEACOCK_TARGET="$target"
   _peacock_apply
 }
@@ -445,6 +591,7 @@ _peacock_wrap() {
   command "$name" "$@"
   code=$?
   _PEACOCK_CMD=""
+  _PEACOCK_SECTION=""
   _PEACOCK_TARGET=""
   _peacock_apply
   return $code

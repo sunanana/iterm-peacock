@@ -34,6 +34,8 @@ Usage:
   iterm-peacock cmd                 List every command's settings and their sections
   iterm-peacock cmd <cmd>           List the sections of <cmd>.ini
   iterm-peacock cmd <cmd> <word>    Show the section <word> matches, and its settings
+  iterm-peacock cmd <cmd> test <argument>...
+                                    Show the section that command line would get
   iterm-peacock cmd <cmd> edit      Open <cmd>.ini in $VISUAL or $EDITOR
   iterm-peacock cmd <cmd> set <pattern> [<key> <value>]
                                     Pick a scheme for that section, or set one key
@@ -74,6 +76,8 @@ Requires iTerm2. Other terminals ignore the escape sequences and nothing changes
 For coding agents:
   Run `iterm-peacock help config` before writing a .peacock by hand, and prefer
   `iterm-peacock set <key> <value>`, which validates the value.
+  Run `iterm-peacock help cmd` before writing a <command>.ini, and check every command
+  line it should tell apart with `iterm-peacock cmd <command> test <argument>...`.
 
   Some commands write files (in the current directory or the settings directory),
   change the installed copy of iterm-peacock, reach the network, or need an
@@ -142,8 +146,9 @@ _help_cmd() {
 cmd — color the terminal while a command is running
 
 A directory of .ini files, one per command. The presence of mysql.ini is what makes
-mysql hooked; no list of commands is kept anywhere else. Each file maps patterns to the
-same settings a .peacock holds, and while the command runs those settings are in effect.
+mysql hooked; no list of commands is kept anywhere else. Each file holds sections of
+the same settings a .peacock holds, and while the command runs the settings of the
+section that matches are in effect.
 
 The directory:
   ~/.config/iterm-peacock/, or $XDG_CONFIG_HOME/iterm-peacock/ if that is set.
@@ -151,42 +156,100 @@ The directory:
   A command with no <command>.ini is never touched.
 
 Format:
-  [<pattern>...]    Starts a section. Patterns are separated by spaces.
-  <key>=<value>     The same keys and values a .peacock accepts.
+  [<pattern>...]              Starts a section. Patterns are separated by spaces.
+  match-options=<condition>...
+                              Optional. Matches the section by conditions instead,
+                              and turns the bracket text into a name.
+  <key>=<value>               The same keys and values a .peacock accepts.
 
-  Patterns are globs (*, ?, [...]). The first section that matches wins, lines before
-  the first section are ignored, and comments, blank lines and a line holding nothing
-  but a color work as they do in a .peacock.
+  Patterns and condition values are globs (*, ?, [...]). Lines before the first section
+  are ignored, and comments, blank lines and a line holding nothing but a color work as
+  they do in a .peacock.
 
-What a pattern is matched against:
-  Every word of the command line except the command itself and words starting with -.
-  A section matches as soon as one of those words matches one of its patterns, so a
-  host, a profile or a database name is picked up without this tool knowing the option
-  grammar of each command.
+A section without match-options — matched by word:
+  The patterns are tried against every word of the command line except the command
+  itself and words starting with -. The section matches as soon as one of those words
+  matches one of its patterns, so a host, a profile or a database name is picked up
+  without this tool knowing the option grammar of each command.
     mysql -h prod-db-01 -u app mydb    prod-db-01, app and mydb are offered
     psql -h db.prod.example.com        the host name is offered
   Write patterns tight enough to say what you mean: [*prod*] also matches a user named
   prod_user, while [prod-db-*] does not.
-  ssh is the exception. Its option grammar is known, so only the destination is matched
-  and ssh has to hold the terminal: a login and a tunnel (ssh -N -L 8080:localhost:80 host)
-  are colored, while a remote command (ssh host ls) and the options -f -W -G -O are left
-  alone.
 
-Example:
-  # ~/.config/iterm-peacock/mysql.ini
-  [prod-db-* *.prod.example.com]
+A section with match-options — matched by conditions:
+  The text in the brackets is a name, not a pattern. Conditions are separated by spaces
+  and the section matches only when every one of them holds. There are two kinds:
+    <names>=<glob>    Starts with -. The value given to that option matches <glob>.
+                      <names> lists every spelling of the option, joined by |.
+    <glob>            Anything else. A word of the command line matches <glob>, tried
+                      against the same words a pattern in brackets is.
+  The value of an option is read without knowing the command, from the way it is written:
+    --port=13306   --port 13306     a name starting with -- : after the =, or the
+                                    next word
+    -P 13306       -P13306          a name starting with a single - : the next word,
+                                    or the rest of the same word
+  If the option appears more than once, the last one counts. Nothing after -- is read as
+  an option. Only the options named in match-options are read at all.
+
+  # ~/.config/iterm-peacock/mysql.ini, for tunnels on 127.0.0.1 told apart by port
+  [PROD]
+  match-options = -h|--host=127.0.0.1 -P|--port=13306
   background=#300000
-  badge=PRODUCTION
 
-  [staging-db-*]
+  [STAGING]
+  match-options = -h|--host=127.0.0.1 -P|--port=13307
   background=#000030
 
+    mysql -h 127.0.0.1 -P 13306 -u eng -p     PROD
+    mysql --host=127.0.0.1 --port=13307       STAGING
+    mysql -h 127.0.0.1                        neither: -P is not on the command line
+
+Which section wins:
+  Of the sections that match, the one with the most conditions wins. A section without
+  match-options counts as one condition, a section with match-options as the number of
+  conditions it lists. On a tie the section written last wins, so put a broad section
+  such as [*] above the narrower ones.
+
+Writing match-options — rules a coding agent should follow:
+  - Name only options that always take a value. An option whose value is optional,
+    such as mysql's -p (a password, or a prompt when given alone), makes the next word
+    its value. Never name options that carry a secret.
+  - List every spelling the command accepts, such as -P|--port. A spelling left out is
+    not read. Names are compared exactly, case included: -P and -p are different options.
+  - A positional argument (a database name, a profile, a file) is a bare condition:
+    `match-options = -h=127.0.0.1 mydb`. A bare condition is tried against every word
+    not starting with -, which includes option values, so mydb also holds for -u mydb.
+    When the text is the value of an option, write it as <names>=<glob> instead.
+  - There is no condition for an option being absent, and a default value is not
+    known. A condition on an option that is not on the command line does not hold. To
+    color both `mysql -h 127.0.0.1` and `mysql -h 127.0.0.1 -P 13306`, write one section
+    for each: one with -h only and one with -h and -P. Where both match, the one with
+    more conditions wins, whatever their order in the file.
+  - A flag without a value (--ssl, -v) cannot be a condition, and bundled short options
+    (-vP13306) are not split apart.
+  - A match-options line that cannot be read, such as an option name without =<glob>,
+    makes its section never match; `iterm-peacock cmd <command>` warns about it. Only the
+    first match-options line of a section counts.
+  - match-options belongs only in <command>.ini. It is not a setting and never
+    reaches the terminal.
+  - Check the result with `iterm-peacock cmd <command> test <arguments>`, passing the
+    arguments as they would be typed. It prints the section that wins and its settings,
+    or fails when none matches. Test every command line the user wants told apart,
+    and one that should match nothing.
+
+ssh:
+  Its option grammar is known, so only the destination is offered as a word and ssh has
+  to hold the terminal: a login and a tunnel (ssh -N -L 8080:localhost:80 host) are
+  colored, while a remote command (ssh host ls) and the options -f -W -G -O are left
+  alone. Since only the destination is offered, option conditions never hold in ssh.ini.
+
 What applies:
-  Only the matching section. The .peacock of the current directory is set aside while
+  Only the winning section. The .peacock of the current directory is set aside while
   the command runs, so the terminal looks exactly as if that section were a .peacock of
   its own. If no section matches, nothing changes.
-  A section without a badge of its own shows the word that matched as the badge; set
-  PEACOCK_COMMAND_BADGE=0 to leave the badge alone.
+  A section without a badge of its own shows a badge anyway: the word that matched, or
+  the section name for a section with match-options. Set PEACOCK_COMMAND_BADGE=0 to
+  leave the badge alone.
   The colors come back when the command exits, an interrupted one included.
   A command that finishes at once still flashes its colors, so add an .ini only for a
   command you use interactively.
@@ -205,6 +268,8 @@ Commands:
   cmd <command>                    List the sections of <command>.ini
   cmd <command> <word>             Show the section <word> matches, and its settings
   cmd <command> show <word>        The same, spelled out
+  cmd <command> test <argument>... Show the section the command line would get, the way
+                                   the hook decides it, match-options included
   cmd <command> edit               Open <command>.ini in $VISUAL or $EDITOR
   cmd <command> set <pattern>      Pick a scheme and save it as that section
   cmd <command> set <pattern> <key> <value>
@@ -214,14 +279,17 @@ Commands:
   cmd <command> unset <pattern> <key>
                                    Remove one key from that section
 
-  Quote a pattern so the shell does not expand it: cmd mysql set 'prod-db-*'.
+  <pattern> is the text between the brackets, which is the name for a section with
+  match-options. Quote it so the shell does not expand it: cmd mysql set 'prod-db-*'.
+  match-options is set like any other key, quoted as one argument:
+    cmd mysql set PROD match-options '-h|--host=127.0.0.1 -P|--port=13306'
   set is create-or-update: it writes the key where it already stands and adds it where
   it does not, so running it twice leaves the same file. There is no separate update.
   unset is the only thing that removes anything. Removing the last key of a section
   removes the section, and removing the last section removes the file, the way unsetting
   the last key of a .peacock removes the file.
   list and show exist so a script never has to rely on a word not being a verb; a host
-  literally named set, unset, edit, show or list has to be written with show.
+  literally named set, unset, edit, show, test or list has to be written with show.
   Nothing is generated or cached, so editing the file by hand is equally fine. Other
   sections, other keys and comments are kept as they are by every one of these.
 EOF
@@ -270,7 +338,8 @@ Notes:
   cursor guide highlights that row.
   Badge defaults to the directory name, or to the pattern when writing a section. If a
   badge is already saved, that text is used instead and the option starts on. Left off
-  in a section, the word that matched is shown as the badge at run time.
+  in a section, the word that matched (the section name, with match-options) is shown
+  as the badge at run time.
   iTerm2 applies color changes one at a time, so after each redraw the picker asks the
   terminal for a status report (ESC [ 5 n) and waits for the reply (ESC [ 0 n) before
   accepting the next key. Keys that arrive in between are dropped, so holding a key
@@ -303,6 +372,11 @@ _die() {
 
 _is_key() {
   _peacock_is_color_key "$1" || [[ "$1" == badge || "$1" == cursor-guide ]]
+}
+
+# <command>.ini のセクションに書けるキー。.peacock のキーに当たり判定の match-options を足したもの
+_is_cmd_key() {
+  _is_key "$1" || [[ "$1" == match-options ]]
 }
 
 # .peacock の内容を書き直して出力する。target キーとして解釈される最初の行を replacement に置き換え、
@@ -368,7 +442,8 @@ _merge_find() {
 _warn_ignored() {
   local file="$1" raw trimmed key value hex
   while IFS= read -r raw || [[ -n "$raw" ]]; do
-    _peacock_parse_line "$raw" && continue
+    # match-options は <command>.ini 専用で、.peacock では効かない
+    _peacock_parse_line "$raw" && [[ "$key" != match-options ]] && continue
     trimmed="${raw#"${raw%%[![:space:]]*}"}"
     [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
     echo "iterm-peacock: ignored: $raw" >&2
@@ -400,22 +475,21 @@ _cmd_sections() {
   done < "$1"
 }
 
-# target に当てはまる最初のセクション見出しを出力する。当てはまるものがなければ失敗する
-_cmd_match() {
-  local raw line patterns
+# index 番目（上から数えて1始まり）のセクション見出しを出力する
+_cmd_section_header() {
+  local raw line current=0
   while IFS= read -r raw || [[ -n "$raw" ]]; do
     _peacock_strip "$raw"
     case "$line" in
       \[*\])
-        patterns="${line#\[}"
-        if _peacock_matches "$2" "${patterns%\]}"; then
+        current=$((current + 1))
+        if [[ $current -eq $2 ]]; then
           printf '%s\n' "$line"
           return 0
         fi
         ;;
     esac
   done < "$1"
-  return 1
 }
 
 # セクションに属していない行と、解釈できなかった行を標準エラーに知らせる
@@ -438,7 +512,13 @@ _warn_cmd_ignored() {
       case "$line" in
         \#*) continue ;;
       esac
-      echo "iterm-peacock: ignored: $raw" >&2
+      key="${line%%=*}"
+      if [[ "${key%"${key##*[![:space:]]}"}" == match-options ]]; then
+        # 読めない match-options は無視されるだけでなく、そのセクションを当てはまらなくする
+        echo "iterm-peacock: unreadable match-options, the section never matches: $raw" >&2
+      else
+        echo "iterm-peacock: ignored: $raw" >&2
+      fi
     fi
   done < "$1"
 }
@@ -587,18 +667,45 @@ _cmd_list_sections() {
   _cmd_sections "$file"
 }
 
-# target に当てはまるセクションと、それが作る設定を表示する。
-# フックと同じ解決を通すため、表示と実際の配色がずれない
+# 語1つに当てはまるセクションと、それが作る設定を表示する
 _cmd_show() {
-  local file="$1" name="$2" target="$3" section
-  [[ -f "$file" ]] || _die "no settings for '$name' at $file (run: iterm-peacock help cmd)"
-  echo "# $file"
-  _warn_cmd_ignored "$file"
-  section="$(_cmd_match "$file" "$target")" || _die "no section matches '$target' in $file"
-  echo "$section"
-  [[ -n "$(_peacock_read_section "$file" "$target")" ]] || _die "no valid settings in $section"
-  _PEACOCK_CMD="$name"
-  _PEACOCK_TARGET="$target"
+  local file="$1" name="$2" word="$3" section target
+  _cmd_require "$file" "$name"
+  _peacock_find_section "$file" "$word" || _die "no section matches '$word' in $file"
+  _cmd_report "$file" "$name" "$section" "$target"
+}
+
+# コマンドの引数をそのまま受け取り、フックが選ぶのと同じセクションと、それが作る設定を表示する。
+# match-options を含めた当たり判定を、コマンドを実際に動かさずに確かめるためのもの
+_cmd_test() {
+  local file="$1" name="$2" section target host
+  shift 2
+  _cmd_require "$file" "$name"
+  if [[ "$name" == ssh ]]; then
+    _peacock_ssh_target "$@" || _die "ssh $* is left alone: only a login or an ssh -N tunnel is colored (run: iterm-peacock help cmd)"
+    set -- "$host"
+  fi
+  _peacock_find_section "$file" "$@" || _die "no section matches: $name${*:+ $*}"
+  _cmd_report "$file" "$name" "$section" "$target"
+}
+
+# 設定ファイルがなければ終了し、あれば見出しと警告を出す
+_cmd_require() {
+  [[ -f "$1" ]] || _die "no settings for '$2' at $1 (run: iterm-peacock help cmd)"
+  echo "# $1"
+  _warn_cmd_ignored "$1"
+}
+
+# 当てはまったセクションの見出しと、それが作る設定を表示する。
+# フックと同じ解決を通すため、表示と実際の配色がずれない
+_cmd_report() {
+  local file="$1" header
+  header="$(_cmd_section_header "$file" "$3")"
+  echo "$header"
+  [[ -n "$(_peacock_read_section "$file" "$3")" ]] || _die "no valid settings in $header"
+  _PEACOCK_CMD="$2"
+  _PEACOCK_SECTION="$3"
+  _PEACOCK_TARGET="$4"
   _peacock_resolve
 }
 
@@ -615,7 +722,7 @@ _cmd_edit() {
 # セクションを書く。キーを渡さなければ配色ピッカーに任せ、渡せばそのキーだけを書く。
 # 同じキーはその位置で置き換えるため、何度実行しても同じ内容になる
 _cmd_set() {
-  local file="$1" name="$2" pattern="$3" key value body
+  local file="$1" name="$2" pattern="$3" key value body topic
   shift 3
   [[ -n "$pattern" ]] || _die "usage: iterm-peacock cmd $name set <pattern> [<key> <value>]"
   if [[ $# -eq 0 ]]; then
@@ -627,9 +734,11 @@ _cmd_set() {
   [[ $# -ge 2 ]] || _die "usage: iterm-peacock cmd $name set <pattern> <key> <value>"
   key="$1"
   value="${*:2}"
-  _is_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+  _is_cmd_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+  topic=config
+  [[ "$key" != match-options ]] || topic=cmd
   # フックと同じ解釈を通して値を検証・正規化する（key / value が正規化された値になる）
-  _peacock_parse_line "$key=$value" || _die "invalid value for $key: '$value' (run: iterm-peacock help config)"
+  _peacock_parse_line "$key=$value" || _die "invalid value for $key: '$value' (run: iterm-peacock help $topic)"
   body=""
   if [[ -f "$file" ]]; then
     body="$(_cmd_section_body "$file" "[$pattern]")"
@@ -653,7 +762,7 @@ _cmd_unset() {
     _cmd_save "$file" "$(_cmd_remove_section "$file" "[$pattern]")"
     return 0
   fi
-  _is_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
+  _is_cmd_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
   body="$(_cmd_section_body "$file" "[$pattern]")"
   _cmd_body_has_key "$body" "$key" || _die "no $key in $file [$pattern]"
   body="$(_merge "$body" "$key=")"
@@ -682,6 +791,7 @@ _cmd() {
       ;;
     set) _cmd_set "$file" "$name" "${3:-}" "${@:4}" ;;
     unset) _cmd_unset "$file" "$name" "${3:-}" "${4:-}" ;;
+    test) _cmd_test "$file" "$name" "${@:3}" ;;
     show)
       [[ $# -eq 3 ]] || _die "usage: iterm-peacock cmd $name show <word>"
       _cmd_show "$file" "$name" "$3"

@@ -387,6 +387,80 @@ case_cmd_does_not_read_peacock() {
   [[ "$output" != *'#003366'* ]]
 }
 
+tunnel_ini() {
+  mkdir -p config
+  printf '[PROD]\nmatch-options = -h|--host=127.0.0.1 -P|--port=13306\nbackground=#300000\n\n' > config/mysql.ini
+  printf '[STAGING]\nmatch-options = -h|--host=127.0.0.1 -P|--port=13307\nbackground=#000030\n' >> config/mysql.ini
+}
+
+case_cmd_test_shows_the_winning_section() {
+  tunnel_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql test -h 127.0.0.1 -P 13306 -u eng -p
+  [ "$status" -eq 0 ]
+  [ "$output" = $'# '"$PWD"$'/config/mysql.ini\n[PROD]\nbackground=#300000\nbadge=PROD\ntab=#300000' ]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql test --host=127.0.0.1 --port=13307
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\n[STAGING]\n'* ]]
+}
+
+case_cmd_test_reports_unmatched_command_line() {
+  tunnel_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql test -h 127.0.0.1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'no section matches: mysql -h 127.0.0.1'* ]]
+}
+
+case_cmd_test_explains_ssh_without_terminal() {
+  mkdir -p config
+  printf '[csw*]\nbackground=#300000\n' > config/ssh.ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh test csw01 ls
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'ssh csw01 ls is left alone'* ]]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh test -N -L 8080:localhost:80 csw01
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\n[csw*]\n'* ]]
+}
+
+case_cmd_set_match_options_normalizes_spaces() {
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql set PROD match-options ' -h=127.0.0.1   -P|--port=13306 '
+  [ "$status" -eq 0 ]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql set PROD background '#300000'
+  [ "$(cat config/mysql.ini)" = $'[PROD]\nmatch-options=-h=127.0.0.1 -P|--port=13306\nbackground=#300000' ]
+}
+
+case_cmd_set_rejects_unreadable_match_options() {
+  local value
+  for value in '-P' '-P=' '-P||--port=1' '-P|=1' '--=1' ''; do
+    PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql set PROD match-options "$value"
+    [ "$status" -eq 1 ]
+  done
+  [ ! -e config/mysql.ini ]
+}
+
+case_cmd_unset_match_options() {
+  tunnel_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql unset PROD match-options
+  [ "$status" -eq 0 ]
+  [ "$(cat config/mysql.ini)" = $'[PROD]\nbackground=#300000\n\n[STAGING]\nmatch-options = -h|--host=127.0.0.1 -P|--port=13307\nbackground=#000030' ]
+}
+
+case_cmd_warns_unreadable_match_options() {
+  mkdir -p config
+  printf '[PROD]\nmatch-options = -P\nbackground=#300000\n' > config/mysql.ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd mysql
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'unreadable match-options, the section never matches: match-options = -P'* ]]
+}
+
+case_set_rejects_match_options_in_peacock() {
+  run "$BIN" set match-options '-P=13306'
+  [ "$status" -eq 1 ]
+  [ ! -e .peacock ]
+  printf 'match-options=-P=13306\nbackground=#003366\n' > .peacock
+  run "$BIN" show
+  [[ "$output" == *'ignored: match-options=-P=13306'* ]]
+}
+
 case_works_through_symlink() {
   mkdir -p bin
   ln -s "$BIN" bin/iterm-peacock
@@ -477,6 +551,14 @@ bats_test_function --description "cmd <command> は設定ファイルがなけ�
 bats_test_function --description "cmd は設定ファイルが1つもなければ失敗する" -- case_cmd_reports_empty_config_dir
 bats_test_function --description "cmd はセクション外の行と読めない行を警告する" -- case_cmd_warns_lines_outside_sections
 bats_test_function --description "cmd <command> <word> は .peacock を混ぜない" -- case_cmd_does_not_read_peacock
+bats_test_function --description "cmd <command> test はコマンド行で勝つセクションと設定を表示する" -- case_cmd_test_shows_the_winning_section
+bats_test_function --description "cmd <command> test は当てはまらなければ失敗する" -- case_cmd_test_reports_unmatched_command_line
+bats_test_function --description "cmd ssh test は端末を占有しない ssh を理由つきで失敗する" -- case_cmd_test_explains_ssh_without_terminal
+bats_test_function --description "cmd set match-options は条件の区切りの空白を揃える" -- case_cmd_set_match_options_normalizes_spaces
+bats_test_function --description "cmd set は読めない match-options を拒否する" -- case_cmd_set_rejects_unreadable_match_options
+bats_test_function --description "cmd unset で match-options だけを消す" -- case_cmd_unset_match_options
+bats_test_function --description "cmd は読めない match-options を警告する" -- case_cmd_warns_unreadable_match_options
+bats_test_function --description ".peacock には match-options を書けない" -- case_set_rejects_match_options_in_peacock
 bats_test_function --description "シンボリックリンク経由でも動く" -- case_works_through_symlink
 bats_test_function --description "--help で使い方とキーを表示する" -- case_help
 bats_test_function --description "help <topic> で詳細を表示する" -- case_help_topics

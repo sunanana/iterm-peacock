@@ -32,11 +32,11 @@ case_section_paints() {
   [ "$output" = "$(bg_seq 300000)$(badge_seq csw01)$(tab_seq 300000)" ]
 }
 
-case_first_matching_section_wins() {
+case_later_section_wins_on_a_tie() {
   printf '[*]\nbackground=#111111\n\n[csw*]\nbackground=#300000\n' > config/ssh.ini
   run_hook "$1" '_peacock_enter ssh csw01'
-  [[ "$output" == *"$(bg_seq 111111)"* ]]
-  [[ "$output" != *"$(bg_seq 300000)"* ]]
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+  [[ "$output" != *"$(bg_seq 111111)"* ]]
 }
 
 case_section_accepts_several_patterns() {
@@ -149,11 +149,96 @@ case_command_name_is_not_matched() {
   [ -z "$output" ]
 }
 
-case_earlier_section_wins_over_later_word() {
-  printf '[mydb]\nbackground=#111111\n\n[prod-db-*]\nbackground=#300000\n' > config/mysql.ini
+case_later_section_wins_over_earlier_word() {
+  printf '[prod-db-*]\nbackground=#300000\n\n[mydb]\nbackground=#111111\n' > config/mysql.ini
   run_hook "$1" '_peacock_enter mysql -h prod-db-01 mydb'
   [[ "$output" == *"$(bg_seq 111111)"* ]]
   [[ "$output" == *"$(badge_seq mydb)"* ]]
+}
+
+# ポートだけが違うトンネル越しの接続を分ける設定
+tunnel_ini() {
+  printf '[PROD]\nmatch-options = -h|--host=127.0.0.1 -P|--port=13306\nbackground=#300000\n\n' > config/mysql.ini
+  printf '[STG]\nmatch-options = -h|--host=127.0.0.1 -P|--port=13307\nbackground=#000030\n' >> config/mysql.ini
+}
+
+case_options_paint_with_section_name_as_badge() {
+  tunnel_ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 -P 13306 --protocol=TCP -u eng -p'
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(bg_seq 300000)$(badge_seq PROD)$(tab_seq 300000)" ]
+}
+
+case_options_require_every_condition() {
+  tunnel_ini
+  local words
+  for words in '-h 127.0.0.1' '-P 13306' '-h 10.0.0.1 -P 13306' '-h 127.0.0.1 -P 3306'; do
+    run_hook "$1" "_peacock_enter mysql $words"
+    [ -z "$output" ]
+  done
+}
+
+case_options_read_every_value_form() {
+  tunnel_ini
+  local words
+  for words in '-h 127.0.0.1 -P13306' '--host=127.0.0.1 --port=13306' '--host 127.0.0.1 --port 13306'; do
+    run_hook "$1" "_peacock_enter mysql $words"
+    [[ "$output" == *"$(bg_seq 300000)"* ]]
+  done
+}
+
+case_options_use_the_last_occurrence() {
+  tunnel_ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 -P 13306 -P 13307'
+  [[ "$output" == *"$(bg_seq 000030)"* ]]
+  [[ "$output" != *"$(bg_seq 300000)"* ]]
+}
+
+case_options_stop_at_double_dash() {
+  tunnel_ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 -- -P 13306'
+  [ -z "$output" ]
+}
+
+case_options_accept_bare_word_conditions() {
+  printf '[APP]\nmatch-options = -h=127.0.0.1 app_*\nbackground=#300000\n' > config/mysql.ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 app_production'
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 other'
+  [ -z "$output" ]
+}
+
+case_more_conditions_win_regardless_of_order() {
+  tunnel_ini
+  printf '\n[LOCAL]\nmatch-options = -h|--host=127.0.0.1\nbackground=#111111\n' >> config/mysql.ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 -P 13306'
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1'
+  [[ "$output" == *"$(bg_seq 111111)"* ]]
+}
+
+case_options_win_over_a_word_section() {
+  printf '[LOCAL]\nmatch-options = -h=127.0.0.1 -P=13306\nbackground=#300000\n\n[127.0.0.1]\nbackground=#111111\n' > config/mysql.ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 -P 13306'
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+}
+
+case_options_section_name_is_not_a_pattern() {
+  printf '[13306]\nmatch-options = -h=10.0.0.1\nbackground=#300000\n' > config/mysql.ini
+  run_hook "$1" '_peacock_enter mysql -h 127.0.0.1 13306'
+  [ -z "$output" ]
+}
+
+case_unreadable_options_never_match() {
+  printf '[13306]\nmatch-options = -P\nbackground=#300000\n' > config/mysql.ini
+  run_hook "$1" '_peacock_enter mysql -P 13306 13306'
+  [ -z "$output" ]
+}
+
+case_options_are_ignored_in_peacock() {
+  printf 'match-options=-P=13306\nbackground=#003366\n' > .peacock
+  run_hook "$1" '_peacock_apply'
+  [ "$output" = "$(bg_seq 003366)$(tab_seq 003366)" ]
 }
 
 case_command_name_skips_prefixes() {
@@ -274,7 +359,7 @@ case_wrap_commands_without_config_dir() {
 
 for shell in bash zsh; do
   bats_test_function --description "[$shell] 当てはまるセクションの配色を適用する" -- case_section_paints "$shell"
-  bats_test_function --description "[$shell] 当てはまる最初のセクションを使う" -- case_first_matching_section_wins "$shell"
+  bats_test_function --description "[$shell] 条件の数が同じなら後に書いたセクションを使う" -- case_later_section_wins_on_a_tie "$shell"
   bats_test_function --description "[$shell] セクションに複数のパターンを書ける" -- case_section_accepts_several_patterns "$shell"
   bats_test_function --description "[$shell] 当てはまらなければディレクトリの配色のまま" -- case_unmatched_keeps_directory_colors "$shell"
   bats_test_function --description "[$shell] 当てはまらなければ何も出力しない" -- case_unmatched_paints_nothing "$shell"
@@ -291,7 +376,18 @@ for shell in bash zsh; do
   bats_test_function --description "[$shell] 接続 URL の中の文字列にも当てはめる" -- case_matches_inside_a_connection_url "$shell"
   bats_test_function --description "[$shell] オプション名は照合しない" -- case_option_names_are_not_matched "$shell"
   bats_test_function --description "[$shell] コマンド名は照合しない" -- case_command_name_is_not_matched "$shell"
-  bats_test_function --description "[$shell] 先に書いたセクションが後ろの語より優先する" -- case_earlier_section_wins_over_later_word "$shell"
+  bats_test_function --description "[$shell] 後に書いたセクションが先に当たった語より優先する" -- case_later_section_wins_over_earlier_word "$shell"
+  bats_test_function --description "[$shell] match-options が当たればセクション名をバッジにして塗る" -- case_options_paint_with_section_name_as_badge "$shell"
+  bats_test_function --description "[$shell] match-options は条件がすべて当たらなければ対象にしない" -- case_options_require_every_condition "$shell"
+  bats_test_function --description "[$shell] match-options は値の書き方の違いを読み取る" -- case_options_read_every_value_form "$shell"
+  bats_test_function --description "[$shell] match-options は同じオプションの最後の値を使う" -- case_options_use_the_last_occurrence "$shell"
+  bats_test_function --description "[$shell] match-options は -- より後ろをオプションとして読まない" -- case_options_stop_at_double_dash "$shell"
+  bats_test_function --description "[$shell] match-options は語の条件も書ける" -- case_options_accept_bare_word_conditions "$shell"
+  bats_test_function --description "[$shell] 条件の多いセクションが書いた順に関係なく優先する" -- case_more_conditions_win_regardless_of_order "$shell"
+  bats_test_function --description "[$shell] 条件の多い match-options が後ろの語のセクションより優先する" -- case_options_win_over_a_word_section "$shell"
+  bats_test_function --description "[$shell] match-options のあるセクションの見出しはパターンにしない" -- case_options_section_name_is_not_a_pattern "$shell"
+  bats_test_function --description "[$shell] 読めない match-options のセクションは対象にしない" -- case_unreadable_options_never_match "$shell"
+  bats_test_function --description "[$shell] .peacock の match-options は無視する" -- case_options_are_ignored_in_peacock "$shell"
   bats_test_function --description "[$shell] パス付き・command・環境変数の前置きを受け付ける" -- case_command_name_skips_prefixes "$shell"
   bats_test_function --description "[$shell] ssh は接続先だけを照合する" -- case_ssh_matches_only_the_destination "$shell"
   bats_test_function --description "[$shell] ssh はリモートコマンド付きを対象にしない" -- case_ssh_ignores_remote_command "$shell"

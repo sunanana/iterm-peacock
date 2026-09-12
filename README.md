@@ -81,6 +81,18 @@ mysql -h prod-db-01 -u app mydb    prod-db-01 matches, the terminal turns red
 psql -h db.staging.example.com     no section matches, nothing changes
 ```
 
+When a word is not enough — tunnels that all connect to `127.0.0.1` and differ only by
+port — a section can match on option values instead. Every condition has to hold, and
+the section with the most conditions wins; on a tie, the one written last.
+
+```ini
+[PROD]
+match-options = -h|--host=127.0.0.1 -P|--port=13306
+background=#300000
+```
+
+`iterm-peacock help cmd` spells out the rules, written so a coding agent can follow them.
+
 `ssh` is the exception: its option grammar is known, so only the destination is
 matched and ssh has to hold the terminal — a login and a tunnel (`ssh -N -L 8080:localhost:80 host`)
 are colored, while `ssh host ls` and `-f` are left alone.
@@ -88,6 +100,7 @@ are colored, while `ssh host ls` and `-f` are left alone.
 ```zsh
 iterm-peacock cmd                                   # every command and its sections
 iterm-peacock cmd mysql prod-db-01                  # what that word would get
+iterm-peacock cmd mysql test -h 127.0.0.1 -P 13306  # what that command line would get
 iterm-peacock cmd mysql set 'prod-db-*'             # pick a scheme for that section
 iterm-peacock cmd mysql set 'prod-db-*' badge PROD  # set one key
 iterm-peacock cmd mysql unset 'prod-db-*'           # remove that section

@@ -120,6 +120,14 @@ case_expands_alias_before_matching() {
   [[ "$output" == *"$(bg_seq 300000)"* ]]
 }
 
+case_unquotes_words_before_matching() {
+  mkdir -p config
+  printf '[PROD]\nmatch-options = --port=13306\nbackground=#300000\n' > config/mysql.ini
+  run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec 'mysql --port="13306"')"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+}
+
 case_ignores_commands_without_settings() {
   mkdir -p config
   printf '[csw*]\nbackground=#300000\n' > config/ssh.ini
@@ -145,4 +153,5 @@ bats_test_function --description "設定のあるコマンドでその配色に�
 bats_test_function --description "ssh 以外のコマンドも語の一致で判定する" -- case_paints_on_any_command_with_settings
 bats_test_function --description "コマンドが終わると元の配色に戻る" -- case_restores_after_the_command
 bats_test_function --description "エイリアスを展開した行で判定する" -- case_expands_alias_before_matching
+bats_test_function --description "引用符を外した語で判定する" -- case_unquotes_words_before_matching
 bats_test_function --description "設定のないコマンドでは何もしない" -- case_ignores_commands_without_settings
