@@ -10,8 +10,10 @@ while [[ -L "$_self" ]]; do
   _link="$(readlink "$_self")"
   [[ "$_link" == /* ]] && _self="$_link" || _self="$(dirname "$_self")/$_link"
 done
+# インストール先（git clone したディレクトリ）。フックの読み込みと update が使う
+_root="$(cd "$(dirname "$_self")/.." && pwd)"
 # shellcheck source=../iterm-peacock.sh
-source "$(cd "$(dirname "$_self")/.." && pwd)/iterm-peacock.sh"
+source "$_root/iterm-peacock.sh"
 
 # ヘルプは .peacock の仕様の一次情報として扱う。README ではなく手元のこの出力が常に版と一致するため、
 # 詳細はトピックに分けてここに置き、README からはこちらへ誘導する。
@@ -36,6 +38,7 @@ Usage:
   iterm-peacock cmd <cmd> unset [<pattern> [<key>]]
                                     Delete the file, one section, or one key in it
   iterm-peacock where               Print the path of the .peacock in effect
+  iterm-peacock update              Update iterm-peacock itself to the latest version
   iterm-peacock help [topic]        Show this help, or one of the topics below
 
 Topics:
@@ -58,6 +61,11 @@ in effect; `iterm-peacock where` prints the one that is.
 
 A command such as ssh or mysql can carry its own colors, from a directory of per-command
 files keyed by pattern. See `iterm-peacock help cmd`.
+
+`iterm-peacock update` fast-forwards the git clone this command runs from to the latest
+commit of its remote. It leaves the clone alone if it has local changes, is on a branch
+other than the default one, or has commits the remote does not. A shell that is already
+open keeps the hook it sourced, so open a new shell after updating.
 
 Requires iTerm2. Other terminals ignore the escape sequences and nothing changes.
 
@@ -1159,6 +1167,43 @@ _pick() {
   done
 }
 
+# ---- 更新 ----
+
+# インストール先の git clone を、上流の最新版まで fast-forward で進める。
+# 開発中のリポジトリを巻き込まないよう、手元の変更・既定ブランチ以外・分岐した履歴では何もしない。
+# 起動中のシェルに source 済みのフックは差し替えられないため、新しいシェルを開くよう案内する
+_update() {
+  local top branch default before after
+  command -v git >/dev/null || _die "git is required to update"
+  top="$(git -C "$_root" rev-parse --show-toplevel 2>/dev/null)" || top=""
+  # 親ディレクトリが別の git リポジトリ（dotfiles など）でも、そちらを更新しないよう一致を確かめる
+  [[ -n "$top" && "$top" == "$(cd "$_root" && pwd -P)" ]] \
+    || _die "$_root is not a git clone; reinstall with git clone to use update"
+  branch="$(git -C "$_root" symbolic-ref --quiet --short HEAD)" \
+    || _die "$_root is not on a branch; leaving it alone"
+  default="$(git -C "$_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" \
+    || default="origin/main"
+  default="${default#origin/}"
+  [[ "$branch" == "$default" ]] || _die "$_root is on '$branch', not '$default'; leaving it alone"
+  git -C "$_root" rev-parse --quiet --verify '@{u}' >/dev/null \
+    || _die "'$branch' in $_root has no upstream to update from"
+  [[ -z "$(git -C "$_root" status --porcelain --untracked-files=no)" ]] \
+    || _die "$_root has local changes; leaving it alone"
+
+  before="$(git -C "$_root" rev-parse --short HEAD)"
+  # pull ではなく fetch と merge --ff-only に分け、利用者の pull.rebase などの設定に左右されないようにする
+  git -C "$_root" fetch --quiet || _die "could not fetch the latest version into $_root"
+  git -C "$_root" merge --ff-only --quiet '@{u}' >/dev/null \
+    || _die "could not fast-forward $_root (it has commits the remote does not); leaving it alone"
+  after="$(git -C "$_root" rev-parse --short HEAD)"
+  if [[ "$before" == "$after" ]]; then
+    echo "already up to date ($after)"
+    return 0
+  fi
+  echo "updated $before -> $after"
+  echo "open a new shell to reload the hook (e.g. exec \$SHELL)"
+}
+
 _main() {
   local line content file
   hex=""
@@ -1214,6 +1259,10 @@ _main() {
     where)
       file="$(_peacock_find)" || _die "no .peacock"
       echo "$file"
+      ;;
+    update)
+      [[ $# -eq 1 ]] || _die "usage: iterm-peacock update"
+      _update
       ;;
     -h|--help|help)
       _help "${2:-}"

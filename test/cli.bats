@@ -402,6 +402,7 @@ case_help() {
   [[ "$output" == *'iterm-peacock set <key> <value>'* ]]
   [[ "$output" == *'cursor-guide'* ]]
   [[ "$output" == *'iterm-peacock help config'* ]]
+  [[ "$output" == *'iterm-peacock update'* ]]
 }
 
 case_help_topics() {
