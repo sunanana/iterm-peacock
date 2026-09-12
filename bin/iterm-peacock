@@ -168,8 +168,9 @@ What a pattern is matched against:
   Write patterns tight enough to say what you mean: [*prod*] also matches a user named
   prod_user, while [prod-db-*] does not.
   ssh is the exception. Its option grammar is known, so only the destination is matched
-  and a login is required: a remote command (ssh host ls) and the options -N -f -W -G -O
-  are left alone.
+  and ssh has to hold the terminal: a login and a tunnel (ssh -N -L 8080:localhost:80 host)
+  are colored, while a remote command (ssh host ls) and the options -f -W -G -O are left
+  alone.
 
 Example:
   # ~/.config/iterm-peacock/mysql.ini

@@ -210,10 +210,15 @@ case_target_accepts_ssh_url() {
 
 case_target_rejects_sessionless_options() {
   local flag
-  for flag in -N -f -G -O -W; do
+  for flag in -f -G -O -W -Nf -fN; do
     run_hook "$1" "_peacock_ssh_target $flag myhost"
     [ "$status" -ne 0 ]
   done
+}
+
+case_target_accepts_tunnel() {
+  run_hook "$1" 'host=; _peacock_ssh_target -N -L 8080:localhost:80 myhost && printf %s "$host"'
+  [ "$output" = myhost ]
 }
 
 case_target_rejects_missing_host() {
@@ -296,7 +301,8 @@ for shell in bash zsh; do
   bats_test_function --description "[$shell] 値が続いたオプションを読み飛ばす" -- case_target_skips_attached_option_values "$shell"
   bats_test_function --description "[$shell] まとめて書いたフラグを読み飛ばす" -- case_target_skips_bundled_flags "$shell"
   bats_test_function --description "[$shell] ssh:// 形式から接続先を取り出す" -- case_target_accepts_ssh_url "$shell"
-  bats_test_function --description "[$shell] シェルを取らないオプションは対象にしない" -- case_target_rejects_sessionless_options "$shell"
+  bats_test_function --description "[$shell] 端末を占有しないオプションは対象にしない" -- case_target_rejects_sessionless_options "$shell"
+  bats_test_function --description "[$shell] -N のトンネルは対象にする" -- case_target_accepts_tunnel "$shell"
   bats_test_function --description "[$shell] 接続先がなければ失敗する" -- case_target_rejects_missing_host "$shell"
   bats_test_function --description "[$shell] ラッパーは実行の前後で塗り替えと復帰をする" -- case_wrapper_paints_and_restores "$shell"
   bats_test_function --description "[$shell] ラッパーは終了ステータスを返す" -- case_wrapper_keeps_exit_status "$shell"

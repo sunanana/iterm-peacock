@@ -82,7 +82,8 @@ psql -h db.staging.example.com     no section matches, nothing changes
 ```
 
 `ssh` is the exception: its option grammar is known, so only the destination is
-matched and a login is required — `ssh host ls` is left alone.
+matched and ssh has to hold the terminal — a login and a tunnel (`ssh -N -L 8080:localhost:80 host`)
+are colored, while `ssh host ls` and `-f` are left alone.
 
 ```zsh
 iterm-peacock cmd                                   # every command and its sections

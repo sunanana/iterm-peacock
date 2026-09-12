@@ -364,7 +364,7 @@ _peacock_command_name() {
 
 # ssh の引数から接続先を取り出し、呼び出し側の変数 host に入れる。
 # ssh だけはオプションの文法が分かっているため、語の総当たりではなく接続先そのものを見る。
-# ログイン以外（リモートコマンド付き、シェルを取らないオプション、接続先なし）では失敗する
+# ログインと -N のトンネル以外（リモートコマンド付き、端末を占有しないオプション、接続先なし）では失敗する
 _peacock_ssh_target() {
   local arg flags count i char takes
   host=""
@@ -381,8 +381,9 @@ _peacock_ssh_target() {
           char="${flags:$i:1}"
           i=$((i + 1))
           case "$char" in
-            # ログインシェルを取らない使い方なので色は変えない
-            N|f|G|O|W) return 1 ;;
+            # 端末を占有しない使い方なので色は変えない。
+            # -N（トンネル専用）はフォアグラウンドで端末を占有し続けるため対象に含める
+            f|G|O|W) return 1 ;;
             # 値を取るオプション。同じ語に値が続いていればそれが値、なければ次の語が値
             [BbcDEeFIiJLlmoPpQRSw])
               if [[ $i -lt $count ]]; then
