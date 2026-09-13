@@ -251,6 +251,28 @@ case_command_name_skips_prefixes() {
   done
 }
 
+case_command_name_skips_running_prefixes() {
+  printf '[prod-db-*]\nbackground=#300000\n' > config/mysql.ini
+  local words
+  for words in 'time mysql -h prod-db-01' 'time -p mysql -h prod-db-01' \
+    'env -i LANG=C mysql -h prod-db-01' 'env -u HOME mysql -h prod-db-01' \
+    'exec -a db mysql -h prod-db-01' 'nohup mysql -h prod-db-01' \
+    'noglob mysql -h prod-db-01' 'nocorrect mysql -h prod-db-01' \
+    'command -p mysql -h prod-db-01' 'LANG=C time env mysql -h prod-db-01'; do
+    run_hook "$1" "_peacock_enter $words"
+    [[ "$output" == *"$(bg_seq 300000)"* ]]
+  done
+}
+
+case_command_name_rejects_prefixes_that_do_not_run() {
+  printf '[prod-db-*]\nbackground=#300000\n' > config/mysql.ini
+  local words
+  for words in 'command -v mysql prod-db-01' 'sudo mysql -h prod-db-01' 'env -u'; do
+    run_hook "$1" "_peacock_enter $words"
+    [ -z "$output" ]
+  done
+}
+
 case_ssh_matches_only_the_destination() {
   printf '[app]\nbackground=#300000\n' > config/ssh.ini
   run_hook "$1" '_peacock_enter ssh -l app myhost'
@@ -389,6 +411,8 @@ for shell in bash zsh; do
   bats_test_function --description "[$shell] 読めない match-options のセクションは対象にしない" -- case_unreadable_options_never_match "$shell"
   bats_test_function --description "[$shell] .peacock の match-options は無視する" -- case_options_are_ignored_in_peacock "$shell"
   bats_test_function --description "[$shell] パス付き・command・環境変数の前置きを受け付ける" -- case_command_name_skips_prefixes "$shell"
+  bats_test_function --description "[$shell] time・env・exec などの前置きをオプションごと読み飛ばす" -- case_command_name_skips_running_prefixes "$shell"
+  bats_test_function --description "[$shell] command -v と sudo は対象にしない" -- case_command_name_rejects_prefixes_that_do_not_run "$shell"
   bats_test_function --description "[$shell] ssh は接続先だけを照合する" -- case_ssh_matches_only_the_destination "$shell"
   bats_test_function --description "[$shell] ssh はリモートコマンド付きを対象にしない" -- case_ssh_ignores_remote_command "$shell"
   bats_test_function --description "[$shell] 接続先を取り出す" -- case_target_plain_host "$shell"

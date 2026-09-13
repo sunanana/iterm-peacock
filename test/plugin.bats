@@ -128,6 +128,64 @@ case_unquotes_words_before_matching() {
   [[ "$output" == *"$(bg_seq 300000)"* ]]
 }
 
+# csw* は赤、pi* は青にする ssh.ini と、prod-db-* を黄にする mysql.ini
+two_hosts_ini() {
+  mkdir -p config
+  printf '[csw*]\nbackground=#300000\n\n[pi*]\nbackground=#000030\n' > config/ssh.ini
+  printf '[prod-db-*]\nbackground=#303000\n' > config/mysql.ini
+}
+
+case_finds_the_command_after_separators() {
+  two_hosts_ini
+  local line
+  for line in 'cd /tmp && ssh csw01' 'false || ssh csw01' 'make; ssh csw01' $'make\nssh csw01' \
+    '(ssh csw01)' '{ ssh csw01 }'; do
+    run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec "$line")"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$(bg_seq 300000)"* ]]
+  done
+}
+
+case_finds_the_command_in_a_pipeline() {
+  two_hosts_ini
+  run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec 'cat dump.sql | mysql -h prod-db-01')"
+  [[ "$output" == *"$(bg_seq 303000)"* ]]
+}
+
+case_first_matching_command_on_the_line_wins() {
+  two_hosts_ini
+  run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec 'ssh csw01 && ssh pi4')"
+  [[ "$output" == *"$(bg_seq 300000)"* ]]
+  [[ "$output" != *"$(bg_seq 000030)"* ]]
+}
+
+case_ignores_background_commands() {
+  two_hosts_ini
+  local line
+  for line in 'ssh -N csw01 &' 'ssh -N csw01 &!' 'ssh -N csw01 &|'; do
+    run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec "$line")"
+    [ -z "$output" ]
+  done
+  run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec 'ssh -N csw01 & ssh pi4')"
+  [[ "$output" == *"$(bg_seq 000030)"* ]]
+  [[ "$output" != *"$(bg_seq 300000)"* ]]
+}
+
+case_drops_redirections_before_matching() {
+  two_hosts_ini
+  local line
+  for line in 'ssh csw01 2>/dev/null' '>log ssh csw01' 'ssh csw01 &>/dev/null' 'ssh csw01 < /dev/null 2>&1'; do
+    run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec "$line")"
+    [[ "$output" == *"$(bg_seq 300000)"* ]]
+  done
+}
+
+case_quoted_separators_do_not_split() {
+  two_hosts_ini
+  run zsh -f -c "$(peacock_env) source '$PLUGIN'; $(run_preexec "echo ';' ssh csw01")"
+  [ -z "$output" ]
+}
+
 case_ignores_commands_without_settings() {
   mkdir -p config
   printf '[csw*]\nbackground=#300000\n' > config/ssh.ini
@@ -154,4 +212,10 @@ bats_test_function --description "ssh 以外のコマンドも語の一致で判
 bats_test_function --description "コマンドが終わると元の配色に戻る" -- case_restores_after_the_command
 bats_test_function --description "エイリアスを展開した行で判定する" -- case_expands_alias_before_matching
 bats_test_function --description "引用符を外した語で判定する" -- case_unquotes_words_before_matching
+bats_test_function --description "&& || ; 改行 括弧の後ろのコマンドも判定する" -- case_finds_the_command_after_separators
+bats_test_function --description "パイプの後ろのコマンドも判定する" -- case_finds_the_command_in_a_pipeline
+bats_test_function --description "1行に複数あれば設定に当てはまる最初のコマンドを使う" -- case_first_matching_command_on_the_line_wins
+bats_test_function --description "& で裏に回したコマンドは対象にしない" -- case_ignores_background_commands
+bats_test_function --description "リダイレクトを除いてから判定する" -- case_drops_redirections_before_matching
+bats_test_function --description "引用符で囲んだ区切り文字では区切らない" -- case_quoted_separators_do_not_split
 bats_test_function --description "設定のないコマンドでは何もしない" -- case_ignores_commands_without_settings

@@ -174,5 +174,8 @@ iTerm2 Only
   after `ssh bastion`, an `ssh prod-web-01` run on bastion does not change the colors.
 - A command that finishes at once only flashes its colors, so hook commands you use
   interactively.
+- A command sent to the background with `&` and a command run through `sudo` are not
+  colored. When one line runs several hooked commands, such as `ssh csw01 && ssh pi4`,
+  the first one sets the colors for the whole line.
 - In `ssh.ini` only the destination is matched; ssh options such as `-p` or `-l` cannot
   pick a section.

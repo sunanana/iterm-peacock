@@ -11,11 +11,38 @@ source "$_PEACOCK_ROOT/iterm-peacock.sh"
 # 打ったコマンドに設定ファイルがあれば、その実行の間だけ配色を切り替える。
 # 元に戻すのは precmd が担うため、ここに終了を見張る処理はない。
 # $2 はエイリアスを展開した後のコマンド行で、${(z)...} でシェルと同じ語分割ができる。
-# 引用符は (Q) で外し、bash のラッパーや CLI の test が受け取る引数と同じ語にする
+#   - 1行を ; && || | |& と括弧でコマンドごとに区切り、設定に当てはまる最初のコマンドを使う。
+#     preexec と precmd は行に1回ずつなので、行の途中で配色を切り替えることはできない
+#   - & で裏に回したコマンドは端末を占有しないため対象にしない
+#   - リダイレクト（2>/dev/null など）は演算子と行き先を語から除く
+#   - 区切りの判定は引用符を外す前に行い（'&&' は区切りにしない）、
+#     渡す語は (Q) で外して、bash のラッパーや CLI の test が受け取る引数と同じにする
 _peacock_preexec() {
+  setopt localoptions extendedglob
   local -a words
-  words=(${(Q)${(z)${2-}}})
-  (( $#words )) && _peacock_enter "${words[@]}"
+  local token redirect=0
+  for token in "${(@z)${2-}}" ';'; do
+    if (( redirect )); then
+      redirect=0
+      continue
+    fi
+    case "$token" in
+      ';'|'&&'|'||'|'|'|'|&'|'('|')'|'{'|'}')
+        (( $#words )) && _peacock_enter "${(@Q)words}" && return 0
+        words=()
+        ;;
+      '&'|'&|'|'&!')
+        words=()
+        ;;
+      *)
+        if [[ "$token" == (\&|[0-9]##|)[\<\>][\<\>\&\|\!-]# ]]; then
+          redirect=1
+        else
+          words+=("$token")
+        fi
+        ;;
+    esac
+  done
   # 当てはまらなかっただけで失敗を返さない（フックの戻り値をシェルに持ち込まない）
   return 0
 }

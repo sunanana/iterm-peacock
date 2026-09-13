@@ -492,14 +492,33 @@ _peacock_read_section() {
 }
 
 # コマンド行の語から、実行されるコマンド名を呼び出し側の変数 name に、
-# そのコマンド名までの語数を skip に入れる（環境変数の前置きと command を読み飛ばす）
+# そのコマンド名までの語数を skip に入れる。
+# 環境変数の代入と、後ろのコマンドをそのまま実行する前置き（command exec env time nohup noglob nocorrect）を
+# そのオプションごと読み飛ばし、値を取るオプション（env -u -P -C -S、exec -a）は値も読み飛ばす。
+# command -v / -V はコマンドを実行しないため失敗する。
+# sudo はオプションの文法がコマンドごとの知識になるため読み飛ばさない
 _peacock_command_name() {
+  local prefix=""
   skip=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      [A-Za-z_]*=*|command|\\command) shift; skip=$((skip + 1)) ;;
+      [A-Za-z_]*=*) ;;
+      command|\\command|exec|env|time|nohup|noglob|nocorrect) prefix="${1#\\}" ;;
+      -*)
+        [[ -n "$prefix" ]] || break
+        case "$prefix:$1" in
+          command:-v|command:-V) return 1 ;;
+          env:-u|env:-P|env:-C|env:-S|exec:-a)
+            shift
+            skip=$((skip + 1))
+            [[ $# -gt 0 ]] || return 1
+            ;;
+        esac
+        ;;
       *) break ;;
     esac
+    shift
+    skip=$((skip + 1))
   done
   [[ $# -gt 0 ]] || return 1
   name="${1##*/}"

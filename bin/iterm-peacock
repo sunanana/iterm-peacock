@@ -243,6 +243,22 @@ ssh:
   colored, while a remote command (ssh host ls) and the options -f -W -G -O are left
   alone. Since only the destination is offered, option conditions never hold in ssh.ini.
 
+Which command on the line:
+  In zsh the whole command line is read before it runs. It is split into commands at
+  ; && || | |& newlines, parentheses and braces, and the first command with a matching
+  section decides the colors, which last until the whole line has finished.
+    cd ~/app && mysql -h prod-db-01        mysql
+    cat dump.sql | mysql -h prod-db-01     mysql
+    ssh csw01 && ssh pi4                   ssh csw01; the colors do not change for pi4
+  A command sent to the background with & or &! is left alone, since it does not hold
+  the terminal. Redirections such as 2>/dev/null or <in are dropped before matching.
+  Variable assignments such as LANG=C and these prefixes are skipped, options included:
+  command exec env time nohup noglob nocorrect. command -v only looks a command up and is
+  left alone. sudo is not skipped, so sudo mysql ... is never colored.
+  bash colors a command through a wrapper function instead, so a command that bash runs
+  without looking up functions (after command, exec, env, nohup or sudo) is not colored
+  there.
+
 What applies:
   Only the winning section. The .peacock of the current directory is set aside while
   the command runs, so the terminal looks exactly as if that section were a .peacock of
