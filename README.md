@@ -122,3 +122,57 @@ iterm-peacock --help
 ## Supported Terminal
 
 iTerm2 Only
+
+## Use cases
+
+### By directory — a `.peacock` file
+
+- **Tell projects apart across many tabs.** Give each repository its own background,
+  tab color and a badge with its name, so both the tab bar and the window show which
+  project a shell is in.
+- **Mark directories where a mistake is expensive.** A red background and a `PROD` badge
+  in the directory that holds production infrastructure code or deploy scripts, on in
+  every shell opened there.
+- **Different colors inside one repository.** In a monorepo, `api/` and `docs/` can each
+  have a `.peacock`; a subdirectory without one gets the nearest one above it.
+- **Several checkouts of the same repository.** Clones and git worktrees live in
+  different directories, so each can carry its own `.peacock`.
+- **A readable scheme without designing one.** `iterm-peacock` previews generated
+  schemes live in the terminal; text keeps a WCAG contrast of at least 7 against the
+  background, and ANSI colors at least 4.5.
+
+### While a command runs — `~/.config/iterm-peacock/<command>.ini`
+
+- **Production servers over ssh.** `[prod-*]` in `ssh.ini` turns the terminal red for
+  `ssh prod-web-01`, and the colors come back when the session ends, an interrupted one
+  included.
+- **A tunnel kept open in a tab.** `ssh -N -L 13306:db:3306 prod-bastion` is colored by
+  the host it connects to for as long as the tunnel is up.
+- **Database clients by host name.** `mysql -h prod-db-01` or `psql -h db.prod.example.com`
+  matched by a pattern on the host name.
+- **Connections through a local tunnel.** When every environment is `127.0.0.1` and only
+  the port differs, `match-options = -h|--host=127.0.0.1 -P|--port=13306` tells production
+  from staging.
+- **Any interactive command that takes a target.** `redis-cli -h prod-cache`,
+  `kubectl --context prod-cluster exec -it app -- sh`: creating `<command>.ini` is all it
+  takes to hook a command.
+- **See what you are connected to.** A section without a badge shows the host that
+  matched, or the section name, as the badge.
+- **Let a coding agent write the rules.** Describe which command lines should look
+  different. `iterm-peacock help cmd` gives the agent the rules, and
+  `iterm-peacock cmd <command> test <argument>...` lets it check each command line.
+
+### What it does not do
+
+- Only iTerm2. Terminal.app and other terminals ignore the escape sequences, so nothing
+  changes.
+- Only zsh and bash.
+- No bold, link, underline or cursor-text colors: iTerm2 cannot restore them to the
+  profile, and everything this tool changes has to come back when you leave.
+- It is not the VS Code Peacock extension and does not read `.vscode/settings.json`.
+- It sees the command line typed in the local shell, not what happens inside a session:
+  after `ssh bastion`, an `ssh prod-web-01` run on bastion does not change the colors.
+- A command that finishes at once only flashes its colors, so hook commands you use
+  interactively.
+- In `ssh.ini` only the destination is matched; ssh options such as `-p` or `-l` cannot
+  pick a section.
