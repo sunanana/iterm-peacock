@@ -461,6 +461,99 @@ case_set_rejects_match_options_in_peacock() {
   [[ "$output" == *'ignored: match-options=-P=13306'* ]]
 }
 
+# expect / expect-not を書いた ssh.ini と、それを横取りしうる mysql.ini
+expect_ini() {
+  mkdir -p config
+  cat > config/ssh.ini <<'EOF'
+[pi*]
+expect = ssh pi5
+expect = cd /tmp && ssh -N suna@pi5
+expect-not = ssh pi5 hostname
+background=#300000
+
+[csw*]
+expect = ssh csw01
+background=#000030
+EOF
+  printf '[prod-db-*]\nbackground=#303000\n' > config/mysql.ini
+}
+
+case_cmd_check_passes() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd check ssh
+  [ "$status" -eq 0 ]
+  [ "$output" = "# $PWD/config/ssh.ini"$'\nok    [pi*]  expect ssh pi5\nok    [pi*]  expect cd /tmp && ssh -N suna@pi5\nok    [pi*]  expect-not ssh pi5 hostname\nok    [csw*]  expect ssh csw01\n4 passed, 0 failed' ]
+}
+
+case_cmd_check_reports_what_was_chosen() {
+  expect_ini
+  printf '\n[other]\nexpect = ssh other-host\nexpect = mysql -h prod-db-01\nexpect-not = ssh csw01\nbackground=#111111\n' >> config/ssh.ini
+  printf '\n[pi5]\nbackground=#222222\n' >> config/ssh.ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd check ssh
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'FAIL  [pi*]  expect ssh pi5 -> [pi5]'* ]]
+  [[ "$output" == *'FAIL  [other]  expect ssh other-host -> not colored'* ]]
+  [[ "$output" == *'FAIL  [other]  expect mysql -h prod-db-01 -> mysql.ini [prod-db-*]'* ]]
+  [[ "$output" == *'ok    [other]  expect-not ssh csw01'* ]]
+  [[ "$output" == *$'\n3 passed, 4 failed' ]]
+}
+
+case_cmd_check_every_file() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# $PWD/config/mysql.ini"$'\nno expect or expect-not lines\n'"# $PWD/config/ssh.ini"* ]]
+  [[ "$output" == *$'\n4 passed, 0 failed' ]]
+}
+
+case_cmd_check_fails_with_nothing_to_check() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd check mysql
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'nothing to check'* ]]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd check psql
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no settings for 'psql'"* ]]
+}
+
+case_cmd_set_verifies_expectations() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh set 'pi*' badge PI
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\nexpectations: 4 passed' ]]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh set 'pi*' match-options nothing-matches
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'FAIL  [pi*]  expect ssh pi5 -> not colored'* ]]
+  [[ "$output" == *'saved, but 2 of 4 expectations'* ]]
+  grep -q '^match-options=nothing-matches$' config/ssh.ini
+}
+
+case_cmd_unset_verifies_expectations() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh unset 'csw*'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'expectations: 3 passed'* ]]
+}
+
+case_cmd_set_and_unset_reject_expect() {
+  expect_ini
+  local before
+  before="$(cat config/ssh.ini)"
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh set 'pi*' expect ssh pi4
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'expect can appear more than once'* ]]
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh unset 'pi*' expect-not
+  [ "$status" -eq 1 ]
+  [ "$(cat config/ssh.ini)" = "$before" ]
+}
+
+case_cmd_show_leaves_out_expectations() {
+  expect_ini
+  PEACOCK_CONFIG_DIR="$PWD/config" run "$BIN" cmd ssh pi5
+  [ "$status" -eq 0 ]
+  [ "$output" = "# $PWD/config/ssh.ini"$'\n[pi*]\nbackground=#300000\nbadge=pi5\ntab=#300000' ]
+}
+
 case_works_through_symlink() {
   mkdir -p bin
   ln -s "$BIN" bin/iterm-peacock
@@ -559,6 +652,14 @@ bats_test_function --description "cmd set は読めない match-options を拒�
 bats_test_function --description "cmd unset で match-options だけを消す" -- case_cmd_unset_match_options
 bats_test_function --description "cmd は読めない match-options を警告する" -- case_cmd_warns_unreadable_match_options
 bats_test_function --description ".peacock には match-options を書けない" -- case_set_rejects_match_options_in_peacock
+bats_test_function --description "cmd check は expect / expect-not がすべて通れば成功する" -- case_cmd_check_passes
+bats_test_function --description "cmd check は失敗した行に実際に選ばれたセクションを出す" -- case_cmd_check_reports_what_was_chosen
+bats_test_function --description "cmd check はコマンドを渡さなければ全ファイルを検証する" -- case_cmd_check_every_file
+bats_test_function --description "cmd check は検証する行も設定ファイルもなければ失敗する" -- case_cmd_check_fails_with_nothing_to_check
+bats_test_function --description "cmd set は書いた後に expect を検証し、失敗すれば知らせる" -- case_cmd_set_verifies_expectations
+bats_test_function --description "cmd unset は消した後に expect を検証する" -- case_cmd_unset_verifies_expectations
+bats_test_function --description "cmd set / unset は expect を書き換えない" -- case_cmd_set_and_unset_reject_expect
+bats_test_function --description "cmd <command> <word> は expect を設定として出さない" -- case_cmd_show_leaves_out_expectations
 bats_test_function --description "シンボリックリンク経由でも動く" -- case_works_through_symlink
 bats_test_function --description "--help で使い方とキーを表示する" -- case_help
 bats_test_function --description "help <topic> で詳細を表示する" -- case_help_topics

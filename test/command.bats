@@ -235,6 +235,13 @@ case_unreadable_options_never_match() {
   [ -z "$output" ]
 }
 
+case_expectations_do_not_reach_the_terminal() {
+  printf '[csw*]\nexpect = ssh csw01\nexpect-not = ssh pi4\nbackground=#300000\n' > config/ssh.ini
+  printf 'expect = ssh csw01\nbackground=#003366\n' > .peacock
+  run_hook "$1" '_peacock_enter ssh csw01; printf SEP; _peacock_precmd'
+  [ "$output" = "$(bg_seq 300000)$(badge_seq csw01)$(tab_seq 300000)SEP${ESC}]1337;SetBadgeFormat=${BEL}$(bg_seq 003366)$(tab_seq 003366)" ]
+}
+
 case_options_are_ignored_in_peacock() {
   printf 'match-options=-P=13306\nbackground=#003366\n' > .peacock
   run_hook "$1" '_peacock_apply'
@@ -410,6 +417,7 @@ for shell in bash zsh; do
   bats_test_function --description "[$shell] match-options のあるセクションの見出しはパターンにしない" -- case_options_section_name_is_not_a_pattern "$shell"
   bats_test_function --description "[$shell] 読めない match-options のセクションは対象にしない" -- case_unreadable_options_never_match "$shell"
   bats_test_function --description "[$shell] .peacock の match-options は無視する" -- case_options_are_ignored_in_peacock "$shell"
+  bats_test_function --description "[$shell] expect / expect-not は端末に送らない" -- case_expectations_do_not_reach_the_terminal "$shell"
   bats_test_function --description "[$shell] パス付き・command・環境変数の前置きを受け付ける" -- case_command_name_skips_prefixes "$shell"
   bats_test_function --description "[$shell] time・env・exec などの前置きをオプションごと読み飛ばす" -- case_command_name_skips_running_prefixes "$shell"
   bats_test_function --description "[$shell] command -v と sudo は対象にしない" -- case_command_name_rejects_prefixes_that_do_not_run "$shell"

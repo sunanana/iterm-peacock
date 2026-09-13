@@ -107,9 +107,13 @@ _peacock_parse_line() {
         *) return 1 ;;
       esac
       ;;
-    # 配色ではなくコマンド連動のセクションの当たり判定。.peacock の読み込みと描画には渡さない
+    # ここから下は配色ではなく、コマンド連動のセクションの当たり判定とその検証。
+    # _peacock_is_rule_key に当たるキーは、.peacock の読み込みと描画には渡さない
     match-options)
       _peacock_parse_conditions "$value" || return 1
+      ;;
+    expect|expect-not)
+      [[ -n "$value" ]] || return 1
       ;;
     *)
       _peacock_is_color_key "$key" || return 1
@@ -119,12 +123,21 @@ _peacock_parse_line() {
   esac
 }
 
+# 配色の設定ではなく、<command>.ini のセクションの当たり判定（match-options）と
+# その検証（expect / expect-not）に使うキーかを調べる
+_peacock_is_rule_key() {
+  case "$1" in
+    match-options|expect|expect-not) return 0 ;;
+  esac
+  return 1
+}
+
 # .peacock を解釈し、有効な設定を key=value の改行区切りで出力する。同じキーは最初の行を使う
 _peacock_read() {
   local file="$1" raw key value seen=" "
   while IFS= read -r raw || [[ -n "$raw" ]]; do
     _peacock_parse_line "$raw" || continue
-    [[ "$key" == match-options ]] && continue
+    _peacock_is_rule_key "$key" && continue
     [[ "$seen" == *" $key "* ]] && continue
     seen="$seen$key "
     printf '%s=%s\n' "$key" "$value"
@@ -468,7 +481,7 @@ _peacock_rank_section() {
 
 # 設定ファイルの index 番目（見出しを上から数えて1始まり）のセクションの設定を key=value の改行区切りで出力する。
 # 見出しより前の行とほかのセクションの行は読み飛ばす。同じキーはセクション内の最初の行を使い、
-# match-options は配色の設定ではないため出力しない
+# 当たり判定と検証のキー（match-options / expect / expect-not）は配色の設定ではないため出力しない
 _peacock_read_section() {
   local file="$1" index="$2" raw line key value seen=" " current=0
   [[ -n "$index" ]] || return 0
@@ -484,7 +497,7 @@ _peacock_read_section() {
     esac
     [[ $current -eq $index ]] || continue
     _peacock_parse_line "$line" || continue
-    [[ "$key" != match-options ]] || continue
+    _peacock_is_rule_key "$key" && continue
     [[ "$seen" == *" $key "* ]] && continue
     seen="$seen$key "
     printf '%s=%s\n' "$key" "$value"
@@ -582,10 +595,10 @@ _peacock_ssh_target() {
   [[ -n "$host" ]] || return 1
 }
 
-# コマンド行の語から設定に当てはまるセクションを探し、当てはまればその配色に切り替える。
-# 元に戻すのは _peacock_precmd（zsh）とラッパー（bash）が担う
-_peacock_enter() {
-  local name skip file section target host
+# 1つのコマンドの語から、そのコマンド名を呼び出し側の変数 name に、設定に当てはまるセクションを section / target に入れる。
+# 設定ファイルがないか、どのセクションにも当てはまらなければ失敗する。配色は変えない
+_peacock_lookup() {
+  local skip file host
   _peacock_command_name "$@" || return 1
   _peacock_config_file "$name"
   [[ -f "$file" ]] || return 1
@@ -594,11 +607,23 @@ _peacock_enter() {
     _peacock_ssh_target "$@" || return 1
     set -- "$host"
   fi
-  _peacock_find_section "$file" "$@" || return 1
+  _peacock_find_section "$file" "$@"
+}
+
+# _peacock_lookup が入れた name / section / target の配色に切り替える
+_peacock_activate() {
   _PEACOCK_CMD="$name"
   _PEACOCK_SECTION="$section"
   _PEACOCK_TARGET="$target"
   _peacock_apply
+}
+
+# コマンド行の語から設定に当てはまるセクションを探し、当てはまればその配色に切り替える。
+# 元に戻すのは _peacock_precmd（zsh）とラッパー（bash）が担う
+_peacock_enter() {
+  local name section target
+  _peacock_lookup "$@" || return 1
+  _peacock_activate
 }
 
 # コマンドをラップして、実行している間だけ設定に合わせた配色にする（bash 用の入口）。

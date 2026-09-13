@@ -36,6 +36,8 @@ Usage:
   iterm-peacock cmd <cmd> <word>    Show the section <word> matches, and its settings
   iterm-peacock cmd <cmd> test <argument>...
                                     Show the section that command line would get
+  iterm-peacock cmd check [<cmd>...]
+                                    Check the expect and expect-not lines of <cmd>.ini
   iterm-peacock cmd <cmd> edit      Open <cmd>.ini in $VISUAL or $EDITOR
   iterm-peacock cmd <cmd> set <pattern> [<key> <value>]
                                     Pick a scheme for that section, or set one key
@@ -76,8 +78,9 @@ Requires iTerm2. Other terminals ignore the escape sequences and nothing changes
 For coding agents:
   Run `iterm-peacock help config` before writing a .peacock by hand, and prefer
   `iterm-peacock set <key> <value>`, which validates the value.
-  Run `iterm-peacock help cmd` before writing a <command>.ini, and check every command
-  line it should tell apart with `iterm-peacock cmd <command> test <argument>...`.
+  Run `iterm-peacock help cmd` before writing a <command>.ini, and follow its order:
+  `iterm-peacock cmd check <command>` before the change, the request written down as
+  expect / expect-not lines, the rule change, and `cmd check` passing after it.
 
   Some commands write files (in the current directory or the settings directory),
   change the installed copy of iterm-peacock, reach the network, or need an
@@ -160,6 +163,8 @@ Format:
   match-options=<condition>...
                               Optional. Matches the section by conditions instead,
                               and turns the bracket text into a name.
+  expect=<command line>       Optional, repeatable. That line has to get this section.
+  expect-not=<command line>   Optional, repeatable. That line must not get this section.
   <key>=<value>               The same keys and values a .peacock accepts.
 
   Patterns and condition values are globs (*, ?, [...]). Lines before the first section
@@ -232,10 +237,54 @@ Writing match-options — rules a coding agent should follow:
     first match-options line of a section counts.
   - match-options belongs only in <command>.ini. It is not a setting and never
     reaches the terminal.
-  - Check the result with `iterm-peacock cmd <command> test <arguments>`, passing the
-    arguments as they would be typed. It prints the section that wins and its settings,
-    or fails when none matches. Test every command line the user wants told apart,
-    and one that should match nothing.
+  - Run `iterm-peacock cmd check <command>` before and after the change, and record what
+    the user asked for as expect and expect-not lines in between (see the order below).
+    To look at one command line on its own,
+    `iterm-peacock cmd <command> test <arguments>` prints the section that wins and its
+    settings, or fails when none matches.
+
+Checking the rules — expect and expect-not:
+  A section can say which command lines it is for. They are never matched against and
+  never reach the terminal; `iterm-peacock cmd check` reads them and reports whether the
+  file still does what they say.
+    expect = <command line>        typing that line colors the terminal with this section
+    expect-not = <command line>    typing that line does not use this section: another
+                                   section wins, or nothing is colored
+  Write the whole line as it would be typed, command included. It is read the way the
+  zsh hook reads a line, so separators, redirections and prefixes count:
+  `expect = cd ~/app && mysql -h 127.0.0.1 -P 13306` is a valid line.
+  Both keys may appear any number of times in a section. Because of that, `cmd set` and
+  `cmd unset` refuse them; edit the file instead.
+
+  # ~/.config/iterm-peacock/mysql.ini
+  [PROD]
+  match-options = -h|--host=127.0.0.1 -P|--port=13306
+  expect = mysql -h 127.0.0.1 -P 13306 -u eng -p
+  expect = mysql --host=127.0.0.1 --port=13306
+  expect-not = mysql -h 127.0.0.1 -P 13307
+  background=#300000
+
+  `iterm-peacock cmd check` prints one line per expectation, ok or FAIL, and after a
+  FAIL what was chosen instead: another section, a section of another <command>.ini,
+  or "not colored". It fails when anything fails, or when there is nothing to check.
+  `cmd set` and `cmd unset` run the same check on the file they changed; the change is
+  saved either way, but they fail and print what broke.
+
+  For coding agents — change a <command>.ini in this order:
+    1. Run `iterm-peacock cmd check <command>` before touching anything. If something
+       already fails, tell the user and settle it first, so a later failure can only
+       come from your change. "no settings" or "nothing to check" is a clean start.
+    2. Write the request down as expectations first: an expect for every command line
+       the user wants colored, and an expect-not for each similar line that must stay
+       different or uncolored. Keep the lines already there. Running check now should
+       fail only on new lines; if every new expect already passes, the request needs
+       no rule change.
+    3. Change the rules: patterns, match-options and the order of sections.
+    4. Run `iterm-peacock cmd check <command>` again and stop only when everything
+       passes, the old expectations included.
+  An expectation that fails means the rules or the expectation are wrong; ask the user
+  which before deleting or rewriting an expect line.
+  cmd check needs zsh, which macOS ships.
 
 ssh:
   Its option grammar is known, so only the destination is offered as a word and ssh has
@@ -281,6 +330,8 @@ Turning it on:
 Commands:
   cmd                              List every command and its sections
   cmd list                         The same, spelled out
+  cmd check [<command>...]         Check the expect and expect-not lines of every
+                                   <command>.ini, or of the ones named
   cmd <command>                    List the sections of <command>.ini
   cmd <command> <word>             Show the section <word> matches, and its settings
   cmd <command> show <word>        The same, spelled out
@@ -306,6 +357,7 @@ Commands:
   the last key of a .peacock removes the file.
   list and show exist so a script never has to rely on a word not being a verb; a host
   literally named set, unset, edit, show, test or list has to be written with show.
+  A command literally named list or check cannot be configured through cmd.
   Nothing is generated or cached, so editing the file by hand is equally fine. Other
   sections, other keys and comments are kept as they are by every one of these.
 EOF
@@ -458,8 +510,8 @@ _merge_find() {
 _warn_ignored() {
   local file="$1" raw trimmed key value hex
   while IFS= read -r raw || [[ -n "$raw" ]]; do
-    # match-options は <command>.ini 専用で、.peacock では効かない
-    _peacock_parse_line "$raw" && [[ "$key" != match-options ]] && continue
+    # match-options / expect / expect-not は <command>.ini 専用で、.peacock では効かない
+    _peacock_parse_line "$raw" && ! _peacock_is_rule_key "$key" && continue
     trimmed="${raw#"${raw%%[![:space:]]*}"}"
     [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
     echo "iterm-peacock: ignored: $raw" >&2
@@ -705,6 +757,122 @@ _cmd_test() {
   _cmd_report "$file" "$name" "$section" "$target"
 }
 
+# 設定ファイルの expect / expect-not を「キー<TAB>セクション番号<TAB>コマンド行」の形で1行ずつ出力する
+_cmd_expectations() {
+  local raw line key value index=0
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    _peacock_strip "$raw"
+    case "$line" in
+      \[*\])
+        index=$((index + 1))
+        continue
+        ;;
+      expect*) ;;
+      *) continue ;;
+    esac
+    [[ $index -gt 0 ]] || continue
+    _peacock_parse_line "$line" || continue
+    case "$key" in
+      expect|expect-not) printf '%s\t%s\t%s\n' "$key" "$index" "$value" ;;
+    esac
+  done < "$1"
+}
+
+# コマンド行ごとに、zsh のフックと同じ読み方で選ばれるセクションを「セクション番号 コマンド名」の形で出力する。
+# どこにも当たらなければ「-」を出す。区切りや引用符の解釈を揃えるため、判定は zsh に任せる
+_cmd_select_lines() {
+  zsh -f -c 'source "$1"; shift
+    for line in "$@"; do
+      if _peacock_select_line "$line"; then print -r -- "$section $name"; else print -r -- -; fi
+    done' iterm-peacock "$_root/iterm-peacock.plugin.zsh" "$@"
+}
+
+# 1つの設定ファイルの expect / expect-not を検証し、_check_passed / _check_failed に数を足す。
+# quiet を渡すと失敗した行だけを出す（set / unset の後の自動検証用）
+_cmd_check_file() {
+  local file="$1" name="$2" quiet="${3:-}" key index cmdline selected header got i=0 ok
+  local -a keys=() indexes=() lines=() results=()
+  while IFS=$'\t' read -r key index cmdline; do
+    keys+=("$key")
+    indexes+=("$index")
+    lines+=("$cmdline")
+  done < <(_cmd_expectations "$file")
+  [[ ${#lines[@]} -gt 0 ]] || return 0
+  while IFS= read -r selected; do
+    results+=("$selected")
+  done < <(_cmd_select_lines "${lines[@]}")
+  [[ ${#results[@]} -eq ${#lines[@]} ]] || _die "could not check $file with zsh"
+  while [[ $i -lt ${#lines[@]} ]]; do
+    selected="${results[$i]}"
+    ok=1
+    if [[ "$selected" == "${indexes[$i]} $name" ]]; then
+      [[ "${keys[$i]}" == expect ]] || ok=0
+    else
+      [[ "${keys[$i]}" == expect-not ]] || ok=0
+    fi
+    header="$(_cmd_section_header "$file" "${indexes[$i]}")"
+    if [[ $ok -eq 1 ]]; then
+      _check_passed=$((_check_passed + 1))
+      [[ -n "$quiet" ]] || printf 'ok    %s  %s %s\n' "$header" "${keys[$i]}" "${lines[$i]}"
+    else
+      _check_failed=$((_check_failed + 1))
+      if [[ "$selected" == - ]]; then
+        got="not colored"
+      elif [[ "${selected#* }" == "$name" ]]; then
+        got="$(_cmd_section_header "$file" "${selected%% *}")"
+      else
+        # _peacock_config_file は file を書き換えるため、サブシェルの中で別のファイルを引く
+        got="${selected#* }.ini $(_peacock_config_file "${selected#* }"; _cmd_section_header "$file" "${selected%% *}")"
+      fi
+      printf 'FAIL  %s  %s %s -> %s\n' "$header" "${keys[$i]}" "${lines[$i]}" "$got"
+    fi
+    i=$((i + 1))
+  done
+}
+
+# 設定ファイルの expect / expect-not を検証する。コマンドを渡さなければすべての <command>.ini が対象。
+# 1つでも失敗するか、検証する行が1つもなければ失敗する
+_cmd_check() {
+  local dir path name file _check_passed=0 _check_failed=0
+  command -v zsh >/dev/null || _die "cmd check needs zsh to read command lines the way the hook does"
+  if [[ $# -eq 0 ]]; then
+    _peacock_config_dir
+    for path in "$dir"/*.ini; do
+      [[ -f "$path" ]] || continue
+      name="${path##*/}"
+      set -- "$@" "${name%.ini}"
+    done
+    [[ $# -gt 0 ]] || _die "no <command>.ini in $dir (run: iterm-peacock help cmd)"
+  fi
+  for name in "$@"; do
+    _peacock_config_file "$name"
+    [[ -f "$file" ]] || _die "no settings for '$name' at $file (run: iterm-peacock help cmd)"
+    echo "# $file"
+    _warn_cmd_ignored "$file"
+    if [[ -z "$(_cmd_expectations "$file")" ]]; then
+      echo "no expect or expect-not lines"
+      continue
+    fi
+    _cmd_check_file "$file" "$name"
+  done
+  if [[ $((_check_passed + _check_failed)) -eq 0 ]]; then
+    _die "nothing to check: add expect = <command line> to a section (run: iterm-peacock help cmd)"
+  fi
+  echo "$_check_passed passed, $_check_failed failed"
+  [[ $_check_failed -eq 0 ]] || exit 1
+}
+
+# set / unset で書き換えた後、そのファイルの expect / expect-not を検証する。
+# 行がなければ何もしない。失敗があれば、書き換えは済んでいることを伝えて失敗する
+_cmd_verify() {
+  local file="$1" name="$2" _check_passed=0 _check_failed=0
+  [[ -f "$file" && -n "$(_cmd_expectations "$file")" ]] || return 0
+  command -v zsh >/dev/null || return 0
+  _cmd_check_file "$file" "$name" quiet
+  [[ $_check_failed -eq 0 ]] || _die "saved, but $_check_failed of $((_check_passed + _check_failed)) expectations in $file fail (run: iterm-peacock cmd check $name)"
+  echo "expectations: $_check_passed passed"
+}
+
 # 設定ファイルがなければ終了し、あれば見出しと警告を出す
 _cmd_require() {
   [[ -f "$1" ]] || _die "no settings for '$2' at $1 (run: iterm-peacock help cmd)"
@@ -750,6 +918,7 @@ _cmd_set() {
   [[ $# -ge 2 ]] || _die "usage: iterm-peacock cmd $name set <pattern> <key> <value>"
   key="$1"
   value="${*:2}"
+  _cmd_reject_expect_key "$key" "$name"
   _is_cmd_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
   topic=config
   [[ "$key" != match-options ]] || topic=cmd
@@ -761,6 +930,16 @@ _cmd_set() {
   fi
   _cmd_save "$file" "$(_cmd_write_section "$file" "[$pattern]" "$(_merge "$body" "$key=$value")")"
   echo "$key=$value -> $file [$pattern]"
+  _cmd_verify "$file" "$name"
+}
+
+# expect / expect-not は1つのセクションに何行も書くため、1行を置き換える set / unset では扱わない
+_cmd_reject_expect_key() {
+  case "$1" in
+    expect|expect-not)
+      _die "$1 can appear more than once in a section, so set and unset do not write it; edit the file (run: iterm-peacock cmd $2 edit)"
+      ;;
+  esac
 }
 
 # パターンを渡さなければ設定ファイルごと、渡せばそのセクション、
@@ -776,8 +955,10 @@ _cmd_unset() {
   _cmd_has_section "$file" "[$pattern]" || _die "no [$pattern] in $file"
   if [[ -z "$key" ]]; then
     _cmd_save "$file" "$(_cmd_remove_section "$file" "[$pattern]")"
+    _cmd_verify "$file" "$name"
     return 0
   fi
+  _cmd_reject_expect_key "$key" "$name"
   _is_cmd_key "$key" || _die "unknown key '$key' (run: iterm-peacock help config)"
   body="$(_cmd_section_body "$file" "[$pattern]")"
   _cmd_body_has_key "$body" "$key" || _die "no $key in $file [$pattern]"
@@ -787,6 +968,7 @@ _cmd_unset() {
   else
     _cmd_save "$file" "$(_cmd_remove_section "$file" "[$pattern]")"
   fi
+  _cmd_verify "$file" "$name"
 }
 
 # cmd サブコマンドの入口。動詞は .peacock 側（show / set / unset）と同じ語彙に揃えている
@@ -795,6 +977,10 @@ _cmd() {
   case "$name" in
     ""|list)
       _cmd_list
+      return 0
+      ;;
+    check)
+      _cmd_check "${@:2}"
       return 0
       ;;
   esac

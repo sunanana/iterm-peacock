@@ -91,6 +91,18 @@ match-options = -h|--host=127.0.0.1 -P|--port=13306
 background=#300000
 ```
 
+A section can also list the command lines it is meant for, and `iterm-peacock cmd check`
+reports whether the file still does what they say — useful after a coding agent, or you,
+changed the rules.
+
+```ini
+[PROD]
+match-options = -h|--host=127.0.0.1 -P|--port=13306
+expect = mysql -h 127.0.0.1 -P 13306 -u eng -p
+expect-not = mysql -h 127.0.0.1 -P 13307
+background=#300000
+```
+
 `iterm-peacock help cmd` spells out the rules, written so a coding agent can follow them.
 
 `ssh` is the exception: its option grammar is known, so only the destination is
@@ -101,6 +113,7 @@ are colored, while `ssh host ls` and `-f` are left alone.
 iterm-peacock cmd                                   # every command and its sections
 iterm-peacock cmd mysql prod-db-01                  # what that word would get
 iterm-peacock cmd mysql test -h 127.0.0.1 -P 13306  # what that command line would get
+iterm-peacock cmd check                             # check every expect and expect-not
 iterm-peacock cmd mysql set 'prod-db-*'             # pick a scheme for that section
 iterm-peacock cmd mysql set 'prod-db-*' badge PROD  # set one key
 iterm-peacock cmd mysql unset 'prod-db-*'           # remove that section
@@ -159,8 +172,9 @@ iTerm2 Only
 - **See what you are connected to.** A section without a badge shows the host that
   matched, or the section name, as the badge.
 - **Let a coding agent write the rules.** Describe which command lines should look
-  different. `iterm-peacock help cmd` gives the agent the rules, and
-  `iterm-peacock cmd <command> test <argument>...` lets it check each command line.
+  different. `iterm-peacock help cmd` gives the agent the rules; the agent records your
+  command lines as `expect` / `expect-not` in the file, and `iterm-peacock cmd check`
+  shows that they still hold after every later change.
 
 ### What it does not do
 
